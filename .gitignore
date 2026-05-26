@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Environment — NEVER commit this
+.env
+
+# Test artifacts — can be large
+artifacts/screenshots/
+artifacts/stacktraces/
+artifacts/logs/
+artifacts/bug_reports/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

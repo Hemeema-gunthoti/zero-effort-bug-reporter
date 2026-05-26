@@ -1,0 +1,10 @@
+{
+  "test_name": "tests/test_dashboard.py::TestAPIEndpoints::test_api_returns_404_for_unknown_item",
+  "timestamp": "20260527_014321",
+  "file": "C:\\Users\\hemeemagunthoti\\zero-effort-bug-reporter\\tests\\test_dashboard.py",
+  "duration": 0.838,
+  "failure_summary": "tests\\test_dashboard.py:53: in test_api_returns_404_for_unknown_item\n    assert \"not found\" in body, (\nE   AssertionError: Expected a 404 JSON response with 'not found' in the body.\nE   assert 'not found' in 'keyerror\\nkeyerror: \\'999\\'\\ntraceback (most recent call last)\\nfile \"c:\\\\users\\\\hemeemagunthoti\\\\zero-effort-bug-reporter\\\\venv\\\\lib\\\\site-packages\\\\flask\\\\app.py\", line 1536, in __call__\\nreturn self.wsgi_app(environ, start_response)\\n       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\nfile \"c",
+  "stacktrace_file": "C:\\Users\\hemeemagunthoti\\zero-effort-bug-reporter\\tests\\..\\artifacts\\stacktraces\\tests_test_dashboard_py__TestAPIEndpoints__test_api_returns_404_for_unknown_item_20260527_014321.log",
+  "console_log_file": "C:\\Users\\hemeemagunthoti\\zero-effort-bug-reporter\\tests\\..\\artifacts\\logs\\tests_test_dashboard_py__TestAPIEndpoints__test_api_returns_404_for_unknown_item_20260527_014321.log",
+  "screenshot_file": "C:\\Users\\hemeemagunthoti\\zero-effort-bug-reporter\\tests\\..\\artifacts\\screenshots\\tests_test_dashboard_py__TestAPIEndpoints__test_api_returns_404_for_unknown_item_20260527_014321.png"
+}
