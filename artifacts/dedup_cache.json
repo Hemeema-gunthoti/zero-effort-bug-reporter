@@ -1,0 +1,17 @@
+{
+  "tests_test_dashboard_py__testapiendpoints__test_api_returns_404_for_unknown_item": {
+    "ticket_key": "ZEBR-56",
+    "timestamp": "2026-05-31T13:03:11.290571",
+    "test_name": "tests/test_dashboard.py::TestAPIEndpoints::test_api_returns_404_for_unknown_item"
+  },
+  "tests_test_login_py__testloginfailurepaths__test_login_with_empty_credentials_shows_validation": {
+    "ticket_key": "ZEBR-57",
+    "timestamp": "2026-05-31T13:03:19.010648",
+    "test_name": "tests/test_login.py::TestLoginFailurePaths::test_login_with_empty_credentials_shows_validation"
+  },
+  "tests_test_login_py__testloginfailurepaths__test_login_with_invalid_password_shows_error": {
+    "ticket_key": "ZEBR-58",
+    "timestamp": "2026-05-31T13:03:27.209058",
+    "test_name": "tests/test_login.py::TestLoginFailurePaths::test_login_with_invalid_password_shows_error"
+  }
+}

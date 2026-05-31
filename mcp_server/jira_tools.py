@@ -6,6 +6,7 @@ All direct Jira REST API calls.
 
 import base64
 import os
+import platform
 import httpx
 from dotenv import load_dotenv
 
@@ -32,7 +33,25 @@ def _url(path: str) -> str:
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(verify=False, timeout=30)
+    verify = platform.system() != "Windows"
+    return httpx.Client(verify=verify, timeout=30)
+
+
+def _make_test_label(test_name: str) -> str:
+    """
+    Convert pytest node ID to a short Jira-safe label.
+    e.g. tests/test_login.py::TestLoginFailurePaths::test_login_with_invalid_password
+    →    test-login_with_invalid_password
+    """
+    import re
+    parts = test_name.split("::")
+    name  = parts[-1] if parts else test_name
+    name  = re.sub(r"_\d{8}_\d{6,9}$", "", name)
+    safe  = name.lower()
+    for ch in " /\\.[]():":
+        safe = safe.replace(ch, "_")
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    return f"test-{safe}"[:100]
 
 
 def create_bug(
@@ -68,7 +87,6 @@ def create_bug(
     if components:
         fields["components"] = [{"name": c} for c in components]
 
-    # Jira Cloud requires accountId, NOT emailAddress
     if assignee:
         fields["assignee"] = {"accountId": assignee}
 
@@ -105,40 +123,89 @@ def create_bug(
         return {"status": "error", "message": f"Connection error: {str(e)}"}
 
 
-def search_similar_bugs(project_key: str, search_text: str) -> dict:
-    safe_text = search_text[:50].replace('"', '\\"')
-    jql = (
+def search_similar_bugs(project_key: str, test_name: str, component: str) -> dict:
+    """
+    Duplicate detection using test name label (exact match).
+    Falls back to component label search if label search returns nothing.
+    """
+    safe_label = _make_test_label(test_name)
+    print(f"🔑 Dedup label: {safe_label}")
+
+    # Strategy 1 — exact test label match
+    jql_label = (
         f'project = "{project_key}" '
         f'AND issuetype = Bug '
         f'AND status != Done '
-        f'AND summary ~ "{safe_text}"'
+        f'AND labels = "{safe_label}"'
     )
-    params = {
-        "jql":        jql,
-        "maxResults": 5,
-        "fields":     "summary,status,priority,assignee",
-    }
 
     try:
         with _client() as client:
-            response = client.get(
+            r = client.get(
                 _url("/search"),
                 headers=HEADERS,
-                params=params,
+                params={
+                    "jql":        jql_label,
+                    "maxResults": 5,
+                    "fields":     "summary,status,priority,labels",
+                },
             )
 
-        if response.status_code == 200:
-            data   = response.json()
-            issues = data.get("issues", [])
+        if r.status_code == 200:
+            issues = r.json().get("issues", [])
+            if issues:
+                return {
+                    "status":       "success",
+                    "total":        len(issues),
+                    "match_method": "test_label",
+                    "issues": [
+                        {
+                            "key":      i["key"],
+                            "summary":  i["fields"]["summary"],
+                            "status":   i["fields"]["status"]["name"],
+                            "priority": i["fields"]["priority"]["name"],
+                            "url":      f"{JIRA_BASE_URL}/browse/{i['key']}",
+                        }
+                        for i in issues
+                    ],
+                }
+    except Exception as e:
+        print(f"⚠️  Label search error: {e}")
+
+    # Strategy 2 — component label fallback
+    jql_component = (
+        f'project = "{project_key}" '
+        f'AND issuetype = Bug '
+        f'AND status != Done '
+        f'AND labels = "auto-reported" '
+        f'AND labels = "{component}"'
+    )
+
+    try:
+        with _client() as client:
+            r = client.get(
+                _url("/search"),
+                headers=HEADERS,
+                params={
+                    "jql":        jql_component,
+                    "maxResults": 5,
+                    "fields":     "summary,status,priority,labels",
+                },
+            )
+
+        if r.status_code == 200:
+            issues = r.json().get("issues", [])
             return {
-                "status": "success",
-                "total":  data.get("total", 0),
+                "status":       "success",
+                "total":        len(issues),
+                "match_method": "component_label",
                 "issues": [
                     {
-                        "key":     i["key"],
-                        "summary": i["fields"]["summary"],
-                        "status":  i["fields"]["status"]["name"],
-                        "url":     f"{JIRA_BASE_URL}/browse/{i['key']}",
+                        "key":      i["key"],
+                        "summary":  i["fields"]["summary"],
+                        "status":   i["fields"]["status"]["name"],
+                        "priority": i["fields"]["priority"]["name"],
+                        "url":      f"{JIRA_BASE_URL}/browse/{i['key']}",
                     }
                     for i in issues
                 ],
@@ -146,7 +213,52 @@ def search_similar_bugs(project_key: str, search_text: str) -> dict:
         else:
             return {
                 "status":  "error",
-                "message": f"Search failed: {response.status_code}",
+                "total":   0,
+                "issues":  [],
+                "message": f"Search failed: {r.status_code}",
+            }
+
+    except Exception as e:
+        return {"status": "error", "total": 0, "issues": [], "message": str(e)}
+
+
+def escalate_priority(ticket_key: str, current_priority: str) -> dict:
+    escalation_map = {
+        "Low":     "Medium",
+        "Medium":  "High",
+        "High":    "Highest",
+        "Highest": "Highest",
+    }
+    new_priority = escalation_map.get(current_priority, "High")
+
+    if new_priority == current_priority:
+        return {
+            "status":       "skipped",
+            "message":      f"{ticket_key} is already at Highest priority — no escalation needed",
+            "new_priority": new_priority,
+        }
+
+    payload = {"fields": {"priority": {"name": new_priority}}}
+
+    try:
+        with _client() as client:
+            response = client.put(
+                _url(f"/issue/{ticket_key}"),
+                headers=HEADERS,
+                json=payload,
+            )
+
+        if response.status_code in (200, 201, 204):
+            return {
+                "status":       "success",
+                "message":      f"Priority escalated: {current_priority} → {new_priority}",
+                "old_priority": current_priority,
+                "new_priority": new_priority,
+            }
+        else:
+            return {
+                "status":  "error",
+                "message": f"Priority update failed: {response.status_code}",
                 "details": response.text,
             }
 
@@ -179,6 +291,10 @@ def add_comment(ticket_key: str, comment: str) -> dict:
 
 
 def attach_file(ticket_key: str, file_path: str) -> dict:
+    """
+    Attach file to Jira ticket.
+    If Zscaler blocks it (403), skip silently — no base64 fallback.
+    """
     if not file_path or not os.path.exists(file_path):
         return {"status": "skipped", "message": f"File not found: {file_path}"}
 
@@ -188,10 +304,10 @@ def attach_file(ticket_key: str, file_path: str) -> dict:
     }
 
     try:
+        filename = os.path.basename(file_path)
+
         with open(file_path, "rb") as f:
             file_content = f.read()
-
-        filename = os.path.basename(file_path)
 
         with _client() as client:
             response = client.post(
@@ -201,7 +317,15 @@ def attach_file(ticket_key: str, file_path: str) -> dict:
             )
 
         if response.status_code in (200, 201):
-            return {"status": "success", "message": f"Attached {filename} to {ticket_key}"}
+            return {
+                "status":  "success",
+                "message": f"Attached {filename} to {ticket_key}",
+            }
+        elif response.status_code == 403:
+            return {
+                "status":  "skipped",
+                "message": f"Attachment blocked by proxy (403) — skipping {filename}",
+            }
         else:
             return {
                 "status":  "error",
@@ -211,3 +335,25 @@ def attach_file(ticket_key: str, file_path: str) -> dict:
 
     except Exception as e:
         return {"status": "error", "message": f"Attachment error: {str(e)}"}
+    
+def get_ticket(ticket_key: str) -> dict:
+    """Fetch a single ticket's current priority and URL."""
+    try:
+        with _client() as client:
+            r = client.get(
+                _url(f"/issue/{ticket_key}"),
+                headers=HEADERS,
+                params={"fields": "priority,status,summary"},
+            )
+        if r.status_code == 200:
+            data = r.json()
+            return {
+                "priority": data["fields"]["priority"]["name"],
+                "status":   data["fields"]["status"]["name"],
+                "summary":  data["fields"]["summary"],
+                "url":      f"{JIRA_BASE_URL}/browse/{ticket_key}",
+            }
+        else:
+            return {"priority": "Medium", "url": f"{JIRA_BASE_URL}/browse/{ticket_key}"}
+    except Exception:
+        return {"priority": "Medium", "url": f"{JIRA_BASE_URL}/browse/{ticket_key}"}    
