@@ -1,14 +1,12 @@
-name: CI — Zero-Effort Bug Reporter
+name: Scheduled Monitor — Regression Check
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"   # runs every 6 hours
+  workflow_dispatch:          # also manually triggerable from GitHub UI
 
 jobs:
-  test-and-report:
+  monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -57,32 +55,20 @@ jobs:
 
       - name: Wait for Flask
         run: |
-          echo "Waiting for Flask..."
           for i in $(seq 1 30); do
             if curl -sf http://localhost:5000/health > /dev/null; then
-              echo "✅ Flask is up"
+              echo "✅ Flask ready"
               break
             fi
-            echo "  attempt $i — waiting..."
             sleep 1
           done
 
-      - name: Run test suite
+      - name: Run scheduled test suite
         continue-on-error: true
         env:
           APP_URL: http://localhost:5000
           DISPLAY: ":99"
         run: pytest tests/ -v --tb=short 2>&1 | tee test_output.txt
-
-      - name: Show captured artifacts
-        if: always()
-        run: |
-          echo "=== Failure JSONs ==="
-          ls -la artifacts/ || echo "empty"
-          echo "=== Screenshots ==="
-          ls -la artifacts/screenshots/ || echo "empty"
-          echo "=== Stack traces ==="
-          ls -la artifacts/stacktraces/ || echo "empty"
 
       - name: Run bug reporter agent
         if: always()
@@ -102,15 +88,14 @@ jobs:
           REDIS_URL:           redis://localhost:6379/0
           APP_URL:             http://localhost:5000
           GITHUB_ACTOR:        ${{ github.actor }}
-          GIT_AUTHOR_EMAIL:    ${{ github.event.pusher.email }}
         run: python main.py
 
-      - name: Upload artifacts
+      - name: Upload monitor artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-artifacts-${{ github.run_number }}
+          name: monitor-${{ github.run_number }}
           path: |
             artifacts/
             test_output.txt
-          retention-days: 30
+          retention-days: 7

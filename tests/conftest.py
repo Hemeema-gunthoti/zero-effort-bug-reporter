@@ -21,10 +21,12 @@ Two responsibilities:
 
 import json
 import os
+import platform
 import pytest
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 
 BASE_URL     = os.getenv("APP_URL", "http://localhost:5000")
 ARTIFACT_DIR = os.path.join(os.path.dirname(__file__), "..", "artifacts")
@@ -43,6 +45,7 @@ def _safe(name: str) -> str:
 def driver():
     """
     Headless Chrome fixture.
+    Works on both Windows (local) and Linux (GitHub Actions).
 
     scope="function" → a brand-new browser per test.
     This is slower than scope="session" but guarantees zero state leakage
@@ -53,12 +56,26 @@ def driver():
     opts.add_argument("--no-sandbox")            # Mandatory inside CI / Docker
     opts.add_argument("--disable-dev-shm-usage") # Avoids /dev/shm OOM in containers
     opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-extensions")    # Faster startup in CI
+    opts.add_argument("--disable-software-rasterizer")
     opts.add_argument("--window-size=1280,800")  # Consistent viewport for screenshots
+
+    # GitHub Actions — point to the installed Chrome binary explicitly
+    if platform.system() == "Linux":
+        chrome_bin = (
+            os.getenv("CHROME_BIN")                        # set by setup-chrome action
+            or "/usr/bin/google-chrome"                    # default Linux path
+            or "/usr/bin/chromium-browser"                 # fallback
+        )
+        if os.path.exists(chrome_bin):
+            opts.binary_location = chrome_bin
 
     # Enable browser-level log capture so we can read console.error() calls
     opts.set_capability("goog:loggingPrefs", {"browser": "ALL"})
 
-    d = webdriver.Chrome(options=opts)
+    # Use Service to suppress chromedriver version mismatch warnings
+    service = Service()
+    d = webdriver.Chrome(service=service, options=opts)
     d.implicitly_wait(5)  # Up to 5s before raising NoSuchElementException
 
     yield d

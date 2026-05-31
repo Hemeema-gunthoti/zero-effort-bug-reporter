@@ -5,6 +5,7 @@ Core AI agent — reads failure metadata, calls Groq, produces bug_report.json.
 """
 
 import sys
+from agent.git_blame import get_blame_assignee, get_last_pusher
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -62,7 +63,40 @@ class FailureAnalysisAgent:
         print(f"\n📊 Classification: severity={severity}  priority={priority}")
 
         assignee_info = self._get_assignee(analysis.get("affected_component", "default"))
-        print(f"👤 Assignee: {assignee_info['name']} ({assignee_info['assignee']})")
+        print(f"👤 Component assignee: {assignee_info['name']} ({assignee_info['assignee']})")
+
+        # ── Git blame — override assignee with whoever broke the line ─
+        blame_result = get_blame_assignee(
+            test_file  = metadata.get("file", ""),
+            stacktrace = artifacts["stacktrace"],
+        )
+
+        if not blame_result.get("found"):
+            print(f"   ⚠️  Blame failed ({blame_result.get('reason')}) — trying last pusher...")
+            blame_result = get_last_pusher()
+
+        if blame_result.get("found"):
+            blame_email   = blame_result["email"]
+            blame_name    = blame_result["name"]
+            print(f"   ✅ Blame resolved: {blame_name} <{blame_email}>")
+
+            # Look up their Jira accountId from email_to_account map
+            email_map     = self.team_mapping.get("email_to_account", {})
+            blame_account = email_map.get(blame_email, {})
+
+            if blame_account:
+                # Override assignee with blamed developer
+                assignee_info["assignee"]   = blame_email
+                assignee_info["accountId"]  = blame_account["accountId"]
+                assignee_info["name"]       = blame_account["name"]
+                assignee_info["blame_source"] = blame_result.get("source", "git_blame")
+                print(f"   🎯 Assignee overridden → {blame_account['name']}")
+            else:
+                print(f"   ⚠️  {blame_email} not in team mapping — keeping component assignee")
+                assignee_info["blame_name"]  = blame_name
+                assignee_info["blame_email"] = blame_email
+        else:
+            print(f"   ⚠️  Blame not resolved ({blame_result.get('reason')})")
 
         bug_report  = self._build_report(metadata, analysis, severity, priority, assignee_info)
         output_path = self._save_report(bug_report, metadata["test_name"])
@@ -261,6 +295,8 @@ h3. Test Details
 * File: {metadata.get('file', 'N/A')}
 * Duration: {metadata.get('duration', 0)}s
 * Captured: {metadata.get('timestamp', 'N/A')}
+* Assigned To: {assignee_info.get('name', 'N/A')} ({assignee_info.get('assignee', 'N/A')})
+* Blame Source: {assignee_info.get('blame_source', 'component mapping')}
 
 ---
 _Generated automatically by Zero-Effort Bug Reporter_"""
