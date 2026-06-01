@@ -125,20 +125,18 @@ def create_bug(
 
 
 def search_similar_bugs(project_key: str, test_name: str, component: str) -> dict:
-    """
-    Duplicate detection using test name label (exact match).
-    Falls back to component label search if label search returns nothing.
-    """
     safe_label = _make_test_label(test_name)
     print(f"🔑 Dedup label: {safe_label}")
 
-    # Strategy 1 — exact test label match
     jql_label = (
         f'project = "{project_key}" '
         f'AND issuetype = Bug '
         f'AND status != Done '
         f'AND labels = "{safe_label}"'
     )
+
+    # ── DEBUG: print exact JQL being sent ────────────────────────────
+    print(f"   JQL: {jql_label}")
 
     try:
         with _client() as client:
@@ -152,8 +150,14 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
                 },
             )
 
+        # ── DEBUG: print raw response ─────────────────────────────────
+        print(f"   Search status: {r.status_code}")
         if r.status_code == 200:
+            total = r.json().get("total", 0)
+            print(f"   Search total:  {total}")
             issues = r.json().get("issues", [])
+            if issues:
+                print(f"   Found labels on first result: {issues[0]['fields'].get('labels', [])}")
             if issues:
                 return {
                     "status":       "success",
@@ -170,6 +174,8 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
                         for i in issues
                     ],
                 }
+        else:
+            print(f"   Search error: {r.text[:200]}")
     except Exception as e:
         print(f"⚠️  Label search error: {e}")
 
@@ -182,6 +188,8 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
         f'AND labels = "{component}"'
     )
 
+    print(f"   Fallback JQL: {jql_component}")
+
     try:
         with _client() as client:
             r = client.get(
@@ -193,6 +201,8 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
                     "fields":     "summary,status,priority,labels",
                 },
             )
+
+        print(f"   Fallback status: {r.status_code}, total: {r.json().get('total', 0) if r.status_code == 200 else 'N/A'}")
 
         if r.status_code == 200:
             issues = r.json().get("issues", [])
@@ -221,7 +231,6 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
 
     except Exception as e:
         return {"status": "error", "total": 0, "issues": [], "message": str(e)}
-
 
 def escalate_priority(ticket_key: str, current_priority: str) -> dict:
     escalation_map = {

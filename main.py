@@ -237,6 +237,9 @@ async def process_failures():
                 continue
 
             # ── Layer 2: Redis/file cache ─────────────────────────────
+            # NOTE: In GitHub Actions, Redis resets every run so cache
+            # is always empty. We skip to Layer 3 (Jira search) which
+            # persists across runs via ticket labels.
             if _is_cached(test_name):
                 cached_key = _get_cached_ticket(test_name)
                 print(f"⚠️  [Layer 2] Cache hit — already reported as {cached_key}")
@@ -256,17 +259,6 @@ async def process_failures():
                     "ticket":   ticket_key,
                     "url":      jira_result.get("ticket_url", ""),
                     "status":   jira_result.get("status", "duplicate"),
-                    "severity": bug_report["severity"],
-                })
-                continue
-
-            # ── Rate limit check ──────────────────────────────────────
-            if not _check_rate_limit(limit=20):
-                results.append({
-                    "test":     test_name,
-                    "ticket":   "RATE_LIMITED",
-                    "url":      "",
-                    "status":   "rate_limited",
                     "severity": bug_report["severity"],
                 })
                 continue
