@@ -85,10 +85,7 @@ def create_bug(
         fields[JIRA_SEVERITY_FIELD] = {"value": severity}
 
     # Filter out blank component names before sending to Jira
-    if components:
-        clean_components = [c for c in components if c and c.strip()]
-        if clean_components:
-            fields["components"] = [{"name": c} for c in clean_components]
+    
 
     if assignee:
         fields["assignee"] = {"accountId": assignee}
