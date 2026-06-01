@@ -81,8 +81,9 @@ def create_bug(
         "labels":      [l for l in (labels or ["ai-generated"]) if l and l.strip()],
     }
 
-    if JIRA_SEVERITY_FIELD and severity:
-        fields[JIRA_SEVERITY_FIELD] = {"value": severity}
+    # NEW — strip whitespace before checking
+    if JIRA_SEVERITY_FIELD and JIRA_SEVERITY_FIELD.strip() and severity:
+        fields[JIRA_SEVERITY_FIELD.strip()] = {"value": severity}
 
     # Filter out blank component names before sending to Jira
     
