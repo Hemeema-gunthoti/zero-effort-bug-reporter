@@ -125,9 +125,14 @@ def create_bug(
 
 
 def search_similar_bugs(project_key: str, test_name: str, component: str) -> dict:
+    """
+    Duplicate detection using test name label (exact match).
+    Uses Jira REST API v3 search endpoint.
+    """
     safe_label = _make_test_label(test_name)
     print(f"🔑 Dedup label: {safe_label}")
 
+    # ── Strategy 1: exact test label match ────────────────────────────
     jql_label = (
         f'project = "{project_key}" '
         f'AND issuetype = Bug '
@@ -135,13 +140,11 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
         f'AND labels = "{safe_label}"'
     )
 
-    # ── DEBUG: print exact JQL being sent ────────────────────────────
-    print(f"   JQL: {jql_label}")
-
     try:
         with _client() as client:
             r = client.get(
-                _url("/search"),
+                # ── Migrated to v3 API ────────────────────────────────
+                f"{JIRA_BASE_URL}/rest/api/3/search/jql",
                 headers=HEADERS,
                 params={
                     "jql":        jql_label,
@@ -150,14 +153,8 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
                 },
             )
 
-        # ── DEBUG: print raw response ─────────────────────────────────
-        print(f"   Search status: {r.status_code}")
         if r.status_code == 200:
-            total = r.json().get("total", 0)
-            print(f"   Search total:  {total}")
             issues = r.json().get("issues", [])
-            if issues:
-                print(f"   Found labels on first result: {issues[0]['fields'].get('labels', [])}")
             if issues:
                 return {
                     "status":       "success",
@@ -175,11 +172,12 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
                     ],
                 }
         else:
-            print(f"   Search error: {r.text[:200]}")
+            print(f"⚠️  Label search failed: {r.status_code} — {r.text[:150]}")
+
     except Exception as e:
         print(f"⚠️  Label search error: {e}")
 
-    # Strategy 2 — component label fallback
+    # ── Strategy 2: component label fallback ──────────────────────────
     jql_component = (
         f'project = "{project_key}" '
         f'AND issuetype = Bug '
@@ -188,12 +186,10 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
         f'AND labels = "{component}"'
     )
 
-    print(f"   Fallback JQL: {jql_component}")
-
     try:
         with _client() as client:
             r = client.get(
-                _url("/search"),
+                f"{JIRA_BASE_URL}/rest/api/3/search/jql",
                 headers=HEADERS,
                 params={
                     "jql":        jql_component,
@@ -201,8 +197,6 @@ def search_similar_bugs(project_key: str, test_name: str, component: str) -> dic
                     "fields":     "summary,status,priority,labels",
                 },
             )
-
-        print(f"   Fallback status: {r.status_code}, total: {r.json().get('total', 0) if r.status_code == 200 else 'N/A'}")
 
         if r.status_code == 200:
             issues = r.json().get("issues", [])
