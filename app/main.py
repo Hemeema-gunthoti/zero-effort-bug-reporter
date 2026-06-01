@@ -18,7 +18,7 @@ app.secret_key = "super-secret-key-change-in-production"
 
 # ── Simulated database ──────────────────────────────────────────────
 USERS = {
-    "admin": "password123",
+    "admin": "wrongpassword",
     "user1": "user123",
 }
 

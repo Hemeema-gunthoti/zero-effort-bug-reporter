@@ -36,8 +36,8 @@ def notify_email(bug_report: dict, jira_result: dict) -> dict:
     status     = jira_result.get("status", "unknown")
     ticket_key = jira_result.get("ticket_key", "N/A")
     ticket_url = jira_result.get("ticket_url", "")
-    assignee   = bug_report.get("assignee", "")
-    to_email   = assignee if assignee and "@" in assignee else SMTP_USERNAME
+    #assignee   = bug_report.get("assignee", "")
+    to_email   = SMTP_USERNAME
 
     try:
         if status == "success":

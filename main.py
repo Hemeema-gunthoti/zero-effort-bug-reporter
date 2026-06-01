@@ -120,7 +120,7 @@ def _mark_cached(test_name: str, ticket_key: str) -> None:
     # ── Redis ─────────────────────────────────────────────────────────
     if REDIS_OK:
         try:
-            _redis.setex(f"dedup:{key}", TTL_HOURS * 3600, data)
+            _redis.set(f"dedup:{key}", data, ex=TTL_HOURS * 3600)
             print(f"   📌 Redis: cached {test_name[:50]} → {ticket_key} (TTL {TTL_HOURS}h)")
             _record_analytics(test_name, ticket_key)
             return
@@ -182,7 +182,7 @@ def _check_rate_limit(limit: int = 20) -> bool:
         key   = "rate_limit:jira_tickets"
         count = _redis.get(key)
         if count is None:
-            _redis.setex(key, 3600, 1)
+            _redis.set(key, 1, ex=3600)
             return True
         count = int(count)
         if count >= limit:
