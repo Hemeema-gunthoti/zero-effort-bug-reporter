@@ -14,14 +14,19 @@
         "accountId": "712020:80ebf310-85c1-47b9-8d4a-0f132dbe0b17",
         "name": "Hemeema Gunthoti"
     },
-    "ui": {
-        "assignee": "hemeemagunthoti@gmail.com",
-        "accountId": "712020:80ebf310-85c1-47b9-8d4a-0f132dbe0b17",
-        "name": "Hemeema Gunthoti"
-    },
     "default": {
         "assignee": "hemeemagunthoti@gmail.com",
         "accountId": "712020:80ebf310-85c1-47b9-8d4a-0f132dbe0b17",
         "name": "Hemeema Gunthoti"
+    },
+    "email_to_account": {
+        "hemeemagunthoti@gmail.com": {
+            "accountId": "712020:80ebf310-85c1-47b9-8d4a-0f132dbe0b17",
+            "name": "Hemeema Gunthoti"
+        },
+        "anandhamsusmitha@gmail.com": {
+            "accountId": "712020:80ebf310-85c1-47b9-8d4a-0f132dbe0b17",
+            "name": "Hemeema Gunthoti"
+        }
     }
 }

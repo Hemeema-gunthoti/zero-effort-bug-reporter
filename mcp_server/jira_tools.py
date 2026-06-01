@@ -78,14 +78,17 @@ def create_bug(
         "description": description,
         "issuetype":   {"name": "Bug"},
         "priority":    {"name": jira_priority},
-        "labels":      labels or ["ai-generated"],
+        "labels":      [l for l in (labels or ["ai-generated"]) if l and l.strip()],
     }
 
     if JIRA_SEVERITY_FIELD and severity:
         fields[JIRA_SEVERITY_FIELD] = {"value": severity}
 
+    # Filter out blank component names before sending to Jira
     if components:
-        fields["components"] = [{"name": c} for c in components]
+        clean_components = [c for c in components if c and c.strip()]
+        if clean_components:
+            fields["components"] = [{"name": c} for c in clean_components]
 
     if assignee:
         fields["assignee"] = {"accountId": assignee}
