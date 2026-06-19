@@ -33,7 +33,7 @@ jobs:
       - name: Get Render URL
         id: get_url
         run: |
-          echo "url=https://bug-reporter-demo.onrender.com" >> $GITHUB_OUTPUT
+          echo "url=${{ secrets.RENDER_APP_URL }}" >> $GITHUB_OUTPUT
 
   test-and-report:
     name: Test Against Live Site
