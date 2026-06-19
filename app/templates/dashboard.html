@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — Bug Reporter{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1><i class="fas fa-chart-line"></i> Dashboard</h1>
+  <p class="subtitle">Overview of your system</p>
+</div>
+
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-icon orders"><i class="fas fa-shopping-cart"></i></div>
+    <div class="stat-info">
+      <span class="stat-value">{{ stats.orders }}</span>
+      <span class="stat-label">Total Orders</span>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon revenue"><i class="fas fa-dollar-sign"></i></div>
+    <div class="stat-info">
+      <span class="stat-value">{{ stats.revenue }}</span>
+      <span class="stat-label">Revenue</span>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon items"><i class="fas fa-box"></i></div>
+    <div class="stat-info">
+      <span class="stat-value">{{ items|length }}</span>
+      <span class="stat-label">Products</span>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon users"><i class="fas fa-users"></i></div>
+    <div class="stat-info">
+      <span class="stat-value">2</span>
+      <span class="stat-label">Active Users</span>
+    </div>
+  </div>
+</div>
+
+<div class="content-grid">
+  <div class="panel">
+    <div class="panel-header">
+      <h2><i class="fas fa-box"></i> Product Inventory</h2>
+      <a href="/items" class="btn-sm">View All <i class="fas fa-arrow-right"></i></a>
+    </div>
+    <div class="panel-body">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Price</th>
+            <th>Stock</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+          <tr>
+            <td>
+              <div class="item-name">
+                <div class="item-avatar">{{ item.name[0] }}</div>
+                <span>{{ item.name }}</span>
+              </div>
+            </td>
+            <td class="mono">${{ item.price }}</td>
+            <td class="mono">{{ item.stock }}</td>
+            <td>
+              {% if item.stock > 100 %}
+                <span class="badge badge-success">In Stock</span>
+              {% elif item.stock > 50 %}
+                <span class="badge badge-warning">Low Stock</span>
+              {% else %}
+                <span class="badge badge-danger">Critical</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <h2><i class="fas fa-terminal"></i> API Endpoints</h2>
+    </div>
+    <div class="panel-body">
+      <div class="endpoint-list">
+        <div class="endpoint">
+          <span class="method method-get">GET</span>
+          <code>/api/items</code>
+          <span class="desc">List all items</span>
+        </div>
+        <div class="endpoint">
+          <span class="method method-get">GET</span>
+          <code>/api/items/&lt;id&gt;</code>
+          <span class="desc">Get single item</span>
+        </div>
+        <div class="endpoint">
+          <span class="method method-get">GET</span>
+          <code>/health</code>
+          <span class="desc">Health check</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

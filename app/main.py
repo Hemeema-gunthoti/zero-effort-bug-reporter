@@ -1,22 +1,9 @@
-"""
-app/main.py
------------
-The sample Flask web application that our test suite runs against.
-
-Intentional bugs (so tests fail and the AI agent gets triggered):
-  Bug 1 — /api/items/<id> raises a KeyError for unknown IDs instead
-           of returning a proper 404. Causes a 500 crash.
-  Bug 2 — The login error message element (#error-message) is never
-           made visible in the JS, so Selenium cannot find it after
-           a failed login attempt.
-"""
-
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = "super-secret-key-change-in-production"
 
-# ── Simulated database ──────────────────────────────────────────────
 USERS = {
     "admin": "wrongpassword",
     "user1": "user123",
@@ -28,61 +15,69 @@ ITEMS = {
     "3": {"name": "Product C", "price": 9.99,  "stock": 300},
 }
 
-# ── Routes ──────────────────────────────────────────────────────────
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user" not in session:
+            return redirect(url_for("home"))
+        return f(*args, **kwargs)
+    return decorated
 
 @app.route("/")
 def home():
+    if "user" in session:
+        return redirect(url_for("dashboard"))
     return render_template("login.html")
-
 
 @app.route("/login", methods=["POST"])
 def login():
     username = request.form.get("username", "")
     password = request.form.get("password", "")
-
     if username in USERS and USERS[username] == password:
         session["user"] = username
         return jsonify({"status": "success", "redirect": "/dashboard"})
-
-    # The HTML never makes #error-message visible after this 401 response.
-    # That is the intentional bug that breaks the Selenium test.
     return jsonify({"status": "error", "message": "Invalid credentials"}), 401
 
+@app.route("/logout")
+def logout():
+    session.pop("user", None)
+    return redirect(url_for("home"))
 
 @app.route("/dashboard")
+@login_required
 def dashboard():
-    if "user" not in session:
-        return jsonify({"error": "Unauthorized"}), 403
+    return render_template(
+        "dashboard.html",
+        user=session["user"],
+        stats={"orders": 150, "revenue": "$12,500"},
+        items=list(ITEMS.values())
+    )
 
-    return jsonify({
-        "user": session["user"],
-        "stats": {"orders": 150, "revenue": "$12,500"},
-        "items": list(ITEMS.values()),
-    })
+@app.route("/items")
+@login_required
+def list_items():
+    return render_template("items.html", items=ITEMS)
 
+@app.route("/items/<item_id>")
+@login_required
+def item_detail(item_id):
+    if item_id not in ITEMS:
+        return render_template("item_detail.html", error="Item not found"), 404
+    return render_template("item_detail.html", item=ITEMS[item_id], item_id=item_id)
 
 @app.route("/api/items/<item_id>")
 def get_item(item_id):
-    """
-    BUG: ITEMS[item_id] raises a KeyError for unknown IDs (e.g. '999').
-    Should return a 404 JSON response instead of crashing with a 500.
-    """
-    return jsonify({"item": ITEMS[item_id]})   # <── Bug here
-
+    if item_id not in ITEMS:
+        return jsonify({"error": "Item not found", "status": 404}), 404
+    return jsonify({"item": ITEMS[item_id]})
 
 @app.route("/api/items")
-def list_items():
+def api_list_items():
     return jsonify({"items": ITEMS, "count": len(ITEMS)})
-
 
 @app.route("/health")
 def health():
-    """
-    CI pipeline polls this endpoint before starting tests
-    to confirm the app is fully up and accepting requests.
-    """
     return jsonify({"status": "ok"}), 200
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}{{ item.name }} — Bug Reporter{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+  <a href="/items"><i class="fas fa-arrow-left"></i> Back to Products</a>
+</div>
+
+<div class="detail-card">
+  <div class="detail-header">
+    <div class="item-avatar huge">{{ item.name[0] }}</div>
+    <div class="detail-info">
+      <h1>{{ item.name }}</h1>
+      <div class="detail-meta">
+        <span class="badge {% if item.stock > 100 %}badge-success{% elif item.stock > 50 %}badge-warning{% else %}badge-danger{% endif %}">
+          {% if item.stock > 100 %}In Stock{% elif item.stock > 50 %}Low Stock{% else %}Critical Stock{% endif %}
+        </span>
+        <span class="detail-id">ID: {{ item_id }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="detail-stats">
+    <div class="detail-stat">
+      <span class="detail-stat-label">Price</span>
+      <span class="detail-stat-value mono">${{ item.price }}</span>
+    </div>
+    <div class="detail-stat">
+      <span class="detail-stat-label">Stock Level</span>
+      <span class="detail-stat-value mono">{{ item.stock }} units</span>
+    </div>
+    <div class="detail-stat">
+      <span class="detail-stat-label">Stock Value</span>
+      <span class="detail-stat-value mono">${{ "%.2f"|format(item.price * item.stock) }}</span>
+    </div>
+  </div>
+
+  <div class="detail-actions">
+    <a href="/api/items/{{ item_id }}" target="_blank" class="btn-secondary">
+      <i class="fas fa-code"></i> View JSON API
+    </a>
+  </div>
+</div>
+{% endblock %}

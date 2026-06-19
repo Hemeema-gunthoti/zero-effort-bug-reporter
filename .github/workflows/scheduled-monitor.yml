@@ -2,11 +2,12 @@ name: Scheduled Monitor — Regression Check
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # runs every 6 hours
-  workflow_dispatch:          # also manually triggerable from GitHub UI
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
 
 jobs:
   monitor:
+    name: Monitor Live Site
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -22,7 +23,6 @@ jobs:
           --health-retries 5
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -50,23 +50,24 @@ jobs:
           mkdir -p artifacts/logs
           mkdir -p artifacts/bug_reports
 
-      - name: Start Flask app
-        run: python app/main.py &
-
-      - name: Wait for Flask
+      - name: Wait for live site
+        env:
+          APP_URL: ${{ secrets.RENDER_APP_URL }}
         run: |
+          echo "Checking live site at $APP_URL..."
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:5000/health > /dev/null; then
-              echo "✅ Flask ready"
+            if curl -sf "$APP_URL/health" > /dev/null; then
+              echo "✅ Live site ready"
               break
             fi
-            sleep 1
+            echo "  attempt $i — waiting..."
+            sleep 2
           done
 
-      - name: Run scheduled test suite
+      - name: Run scheduled test suite against LIVE site
         continue-on-error: true
         env:
-          APP_URL: http://localhost:5000
+          APP_URL: ${{ secrets.RENDER_APP_URL }}
           DISPLAY: ":99"
         run: pytest tests/ -v --tb=short 2>&1 | tee test_output.txt
 
@@ -86,7 +87,7 @@ jobs:
           SMTP_PASSWORD:       ${{ secrets.SMTP_PASSWORD }}
           FROM_EMAIL:          ${{ secrets.SMTP_USERNAME }}
           REDIS_URL:           redis://localhost:6379/0
-          APP_URL:             http://localhost:5000
+          APP_URL:             ${{ secrets.RENDER_APP_URL }}
           GITHUB_ACTOR:        ${{ github.actor }}
         run: python main.py
 

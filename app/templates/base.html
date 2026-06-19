@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Bug Reporter Demo{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  {% if session.get('user') %}
+  <nav class="navbar">
+    <div class="nav-brand">
+      <i class="fas fa-bug"></i>
+      <span>BugReporter</span>
+    </div>
+    <div class="nav-links">
+      <a href="/dashboard" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">
+        <i class="fas fa-chart-line"></i> Dashboard
+      </a>
+      <a href="/items" class="{% if request.endpoint == 'list_items' or request.endpoint == 'get_item' %}active{% endif %}">
+        <i class="fas fa-box"></i> Items
+      </a>
+      <a href="/api/items" target="_blank">
+        <i class="fas fa-code"></i> API
+      </a>
+    </div>
+    <div class="nav-user">
+      <span class="user-badge"><i class="fas fa-user"></i> {{ session.user }}</span>
+      <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+        <i class="fas fa-moon" id="theme-icon"></i>
+      </button>
+      <a href="/logout" class="btn-logout"><i class="fas fa-sign-out-alt"></i></a>
+    </div>
+  </nav>
+  {% endif %}
+
+  <main class="{% if not session.get('user') %}centered{% endif %}">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
