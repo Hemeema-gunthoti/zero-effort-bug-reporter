@@ -31,15 +31,11 @@ class AIFixAgent:
             api_key=settings.GROQ_API_KEY,
             http_client=httpx.Client(verify=False),
         )
-        self.confidence_threshold = 0.5  # FIX: Lowered from 0.7 to catch more fixes
+        self.confidence_threshold = 0.5
 
-    # ═════════════════════════════════════════════════════════════════
-    # New propose_fix() method - reads bug report JSON
-    # ═════════════════════════════════════════════════════════════════
     def propose_fix(self, bug_report_path: str, mode: str = "propose-only") -> Dict:
         """
         Reads a bug report JSON and proposes a fix.
-        This is the interface expected by main.py and the CI workflow.
         """
         print(f"\n{'='*60}")
         print(f"🤖 AI FIX AGENT")
@@ -47,7 +43,6 @@ class AIFixAgent:
         print(f" Mode: {mode}")
         print(f"{'='*60}")
 
-        # Read the bug report to extract failure info
         try:
             with open(bug_report_path, 'r') as f:
                 bug_report = json.load(f)
@@ -55,16 +50,12 @@ class AIFixAgent:
             print(f"❌ Failed to read bug report: {e}")
             return {"fixed": False, "reason": f"read_error: {e}"}
 
-        # Extract metadata from bug report
         metadata = bug_report.get("metadata", {})
         test_name = metadata.get("test_name", "unknown")
         error_type = metadata.get("error_type", "Unknown")
         affected_component = metadata.get("affected_component", "unknown")
         
-        # FIX: Extract jira_ticket from bug_report if available
         jira_ticket = bug_report.get("ticket_key") or bug_report.get("jira_ticket")
-        
-        # If not in bug_report, try to find from bug_reports directory naming or cache
         if not jira_ticket:
             jira_ticket = self._get_jira_ticket_from_cache_or_files()
 
@@ -74,7 +65,6 @@ class AIFixAgent:
         if jira_ticket:
             print(f"🎫 Jira Ticket: {jira_ticket}")
 
-        # Build failure context from bug report
         failures = [{
             "test_name": test_name,
             "test_file": metadata.get("test_file"),
@@ -84,15 +74,11 @@ class AIFixAgent:
             "description": bug_report.get("description", ""),
         }]
 
-        # Score and fix files
         file_scores = self._score_files_for_fixing(failures)
-        
-        # FIX: If no high confidence files, try ALL source files with component-based scoring
         high_confidence = {k: v for k, v in file_scores.items() if v['score'] >= self.confidence_threshold}
         
         if not high_confidence:
             print("⚠️ No high-confidence files found. Trying component-based fallback...")
-            # FIX: Fallback - include files matching the component even with low score
             component_files = {k: v for k, v in file_scores.items() 
                              if v.get('component_match') or v['score'] > 0.1}
             if component_files:
@@ -133,8 +119,7 @@ class AIFixAgent:
         }
 
     def _get_jira_ticket_from_cache_or_files(self) -> Optional[str]:
-        """FIX: Try to find jira ticket from various sources."""
-        # Try bug_reports directory
+        """Try to find jira ticket from various sources."""
         bug_reports = list(ARTIFACT_DIR.glob("bug_reports/bug_report_*.json"))
         for br in bug_reports:
             try:
@@ -145,7 +130,6 @@ class AIFixAgent:
             except:
                 pass
         
-        # Try dedup cache
         cache_file = ARTIFACT_DIR / "dedup_cache.json"
         if cache_file.exists():
             try:
@@ -158,12 +142,8 @@ class AIFixAgent:
                 pass
         return None
 
-    # Keep original analyze_and_fix for backward compatibility
     def analyze_and_fix(self, test_output_path: str, mode: str = "propose-only") -> Dict:
-        """
-        Original method that reads test output text file.
-        Kept for backward compatibility.
-        """
+        """Original method for backward compatibility."""
         print(f"\n{'='*60}")
         print(f"🤖 AI FIX AGENT")
         print(f" Mode: {mode}")
@@ -238,7 +218,6 @@ class AIFixAgent:
     def _score_files_for_fixing(self, failures: List[Dict]) -> Dict[str, Dict]:
         files = {}
         
-        # FIX: Expanded source paths - include all possible app files
         source_paths = [
             "app/main.py",
             "app/routes.py",
@@ -273,20 +252,20 @@ class AIFixAgent:
                 error_type = failure.get("error_type", "").lower()
                 test_file = (failure.get("test_file") or "").lower()
 
-                # FIX: Component-based matching (strong signal)
+                # Component-based matching (strong signal)
                 if component and component in path.lower():
                     score += 0.4
                     reasons.append(f"component: {component}")
                     component_match = True
 
-                # FIX: Test file name matching
+                # Test file name matching
                 if test_file:
                     test_name = Path(test_file).stem
                     if test_name in path.lower() or test_name.replace("test_", "") in path.lower():
                         score += 0.3
                         reasons.append(f"test_file: {test_name}")
 
-                # FIX: Error type matching
+                # Error type matching
                 if error_type == "assertionerror" and any(x in path.lower() for x in ["main.py", "routes.py", "views.py", "auth.py"]):
                     score += 0.2
                     reasons.append("assertionerror → backend")
@@ -301,17 +280,17 @@ class AIFixAgent:
                     score += 0.3
                     reasons.append(f"mentioned: {file_name}")
 
-                # FIX: Login-related errors → login files
+                # Login-related errors → login files
                 if "login" in error_text and "login" in path.lower():
                     score += 0.25
                     reasons.append("login context")
                 
-                # FIX: Dashboard-related errors → dashboard files
+                # Dashboard-related errors → dashboard files
                 if "dashboard" in error_text and "dashboard" in path.lower():
                     score += 0.25
                     reasons.append("dashboard context")
                 
-                # FIX: Unauthorized/403 errors → auth files
+                # Unauthorized/403 errors → auth files
                 if any(x in error_text for x in ["unauthorized", "403", "auth", "login required"]):
                     if any(x in path.lower() for x in ["auth", "login", "main.py", "routes"]):
                         score += 0.3
@@ -325,7 +304,7 @@ class AIFixAgent:
             files[path] = {
                 "score": min(score, 1.0),
                 "content": content,
-                "reasons": list(set(reasons)),  # deduplicate reasons
+                "reasons": list(set(reasons)),
                 "component_match": component_match,
             }
 
@@ -356,13 +335,15 @@ RULES:
 1. MINIMAL changes only
 2. Preserve all functionality
 3. Do NOT change file paths
-4. Return ONLY JSON: {"file_path": "full new content"}"""
+4. Return ONLY a single JSON object with file paths as keys and full file content as values
+5. Do NOT include markdown formatting, explanations, or multiple JSON objects
+6. Example format: {"app/main.py": "import flask..."}"""
 
         try:
             response = self.client.chat.completions.create(
                 model=settings.GROQ_MODEL,
                 messages=[
-                    {"role": "system", "content": "Precise code fixer. Output only valid JSON."},
+                    {"role": "system", "content": "You are a precise code fixer. Output ONLY valid JSON. No markdown. No explanations."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.05,
@@ -370,20 +351,106 @@ RULES:
             )
 
             raw = response.choices[0].message.content.strip()
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw).strip()
-
-            fixes = json.loads(raw)
-            validated = {}
-            for path, content in fixes.items():
-                if path in source_files and len(content) > 100:
-                    validated[path] = content
-
-            return validated
+            
+            # FIX: Aggressive JSON extraction - handle multiple JSON objects, markdown, etc.
+            fixes = self._extract_json_from_response(raw, source_files)
+            
+            if fixes:
+                return fixes
+            else:
+                print(f"⚠️ Could not extract valid JSON from response")
+                print(f"Raw response preview: {raw[:200]}...")
+                return {}
 
         except Exception as e:
             print(f"⚠️ Fix generation failed: {e}")
             return {}
+
+    def _extract_json_from_response(self, raw: str, source_files: Dict[str, str]) -> Dict[str, str]:
+        """
+        FIX: Robust JSON extraction from LLM response.
+        Handles markdown, multiple JSON objects, extra text, etc.
+        """
+        # Remove markdown code blocks
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw).strip()
+        
+        # Try to find JSON object boundaries
+        best_fixes = {}
+        
+        # Strategy 1: Try parsing the whole thing first
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return self._validate_fixes(parsed, source_files)
+        except json.JSONDecodeError:
+            pass
+        
+        # Strategy 2: Find all JSON-like objects using brace matching
+        depth = 0
+        start = -1
+        for i, char in enumerate(raw):
+            if char == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0 and start != -1:
+                    candidate = raw[start:i+1]
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            validated = self._validate_fixes(parsed, source_files)
+                            if validated:
+                                # Merge fixes, prefer longer content
+                                for k, v in validated.items():
+                                    if k not in best_fixes or len(v) > len(best_fixes[k]):
+                                        best_fixes[k] = v
+                    except json.JSONDecodeError:
+                        pass
+                    start = -1
+        
+        if best_fixes:
+            return best_fixes
+        
+        # Strategy 3: Try to fix common JSON issues and retry
+        fixed_raw = raw
+        fixed_raw = re.sub(r',\s*}', '}', fixed_raw)  # Remove trailing commas before }
+        fixed_raw = re.sub(r',\s*]', ']', fixed_raw)  # Remove trailing commas before ]
+        fixed_raw = fixed_raw.replace("'", '"')  # Fix single quotes
+        
+        try:
+            parsed = json.loads(fixed_raw)
+            if isinstance(parsed, dict):
+                return self._validate_fixes(parsed, source_files)
+        except json.JSONDecodeError:
+            pass
+        
+        # Strategy 4: Try first { to last }
+        first_brace = raw.find('{')
+        last_brace = raw.rfind('}')
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            try:
+                parsed = json.loads(raw[first_brace:last_brace+1])
+                if isinstance(parsed, dict):
+                    return self._validate_fixes(parsed, source_files)
+            except json.JSONDecodeError:
+                pass
+        
+        return {}
+
+    def _validate_fixes(self, parsed: Dict, source_files: Dict[str, str]) -> Dict[str, str]:
+        """Validate that parsed fixes are for known source files and have reasonable content."""
+        validated = {}
+        for path, content in parsed.items():
+            if isinstance(path, str) and isinstance(content, str):
+                # Check if path is in our source files or is a reasonable file path
+                if path in source_files or path.startswith("app/") or path.startswith("tests/"):
+                    if len(content) > 50:  # Must have substantial content
+                        validated[path] = content
+                        print(f"✅ Valid fix for {path} ({len(content)} chars)")
+        return validated
 
     def _generate_diffs(self, fixes: Dict[str, str], originals: Dict[str, str]) -> Dict[str, str]:
         diffs = {}
@@ -440,4 +507,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()ai fix
