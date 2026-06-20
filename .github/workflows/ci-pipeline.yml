@@ -76,16 +76,25 @@ jobs:
 
       - name: Start Flask app
         run: |
-          # FIX: Use python directly instead of flask module
-          nohup python app/main.py > flask.log 2>&1 &
+          # Debug: Check Python file syntax
+          python -m py_compile app/main.py || echo "❌ Syntax error in app/main.py"
+          
+          # Start Flask and capture ALL output immediately
+          python app/main.py > flask.log 2>&1 &
           echo "FLASK_PID=$!" >> $GITHUB_ENV
           sleep 5
           
-          # Debug
+          # Check if process is still running
           echo "=== Process check ==="
-          ps aux | grep python | grep -v grep || echo "No python processes"
+          ps aux | grep -E "python.*main" | grep -v grep || echo "No main.py process found"
+          
+          # Check port
           echo "=== Port check ==="
           ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || echo "Port 5000 not listening"
+          
+          # Show logs immediately
+          echo "=== Flask logs (first 50 lines) ==="
+          cat flask.log 2>/dev/null | head -50 || echo "No log file"
 
       - name: Wait for Flask healthy
         run: |
@@ -95,25 +104,15 @@ jobs:
               echo "✅ Flask ready"
               exit 0
             fi
-            echo "⏳ Waiting for Flask... ($i/30) - HTTP: $HTTP_CODE"
+            echo "⏳ Waiting... ($i/30) HTTP: $HTTP_CODE"
             sleep 1
           done
-          echo "❌ Flask failed to start"
-          echo "=== Flask logs ==="
-          cat flask.log 2>/dev/null || echo "No log file"
+          echo "❌ Flask failed"
+          echo "=== Full Flask logs ==="
+          cat flask.log 2>/dev/null || echo "No logs"
           echo "=== All python processes ==="
           ps aux | grep python || true
-          echo "=== Port 5000 ==="
-          ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || lsof -i :5000 2>/dev/null || true
           exit 1
-
-      - name: Wait for Flask healthy
-        run: |
-          for i in {1..30}; do
-            curl -sf http://localhost:5000/health && echo "✅ Flask ready" && exit 0
-            sleep 1
-          done
-          echo "❌ Flask failed to start" && exit 1
 
       - name: Run test suite
         id: pytest
@@ -125,7 +124,10 @@ jobs:
           pytest tests/ -v --tb=short \
             --json-report --json-report-file=artifacts/test_report.json \
             2>&1 | tee artifacts/test_output.txt
-
+      - name: Check templates exist
+        run: |
+          ls -la app/templates/ || echo "❌ templates directory missing"
+          ls -la app/templates/*.html || echo "❌ No HTML templates found"
       - name: Analyze results
         id: test_result
         run: |
