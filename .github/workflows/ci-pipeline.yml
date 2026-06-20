@@ -74,18 +74,35 @@ jobs:
       - name: Prepare directories
         run: mkdir -p artifacts/{screenshots,stacktraces,logs,bug_reports,ai_fixes}
 
-      - name: Start Flask app
+            - name: Start Flask app
         run: |
-          python app/main.py &
+          # FIX: Export FLASK_APP and start with explicit host/port
+          export FLASK_APP=app/main.py
+          python -m flask run --host=0.0.0.0 --port=5000 &
           echo "FLASK_PID=$!" >> $GITHUB_ENV
+          # Also try direct python startup as fallback
+          sleep 2
+          if ! curl -sf http://localhost:5000/health > /dev/null 2>&1; then
+            echo "Flask not responding, trying direct startup..."
+            python app/main.py &
+            echo "FLASK_PID=$!" >> $GITHUB_ENV
+          fi
 
       - name: Wait for Flask healthy
         run: |
-          for i in {1..30}; do
-            curl -sf http://localhost:5000/health && echo "✅ Flask ready" && exit 0
+          for i in {1..60}; do
+            if curl -sf http://localhost:5000/health > /dev/null 2>&1; then
+              echo "✅ Flask ready"
+              exit 0
+            fi
+            echo "⏳ Waiting for Flask... ($i/60)"
             sleep 1
           done
-          echo "❌ Flask failed to start" && exit 1
+          echo "❌ Flask failed to start"
+          # Debug: check if process is running
+          ps aux | grep python || true
+          netstat -tlnp 2>/dev/null | grep 5000 || true
+          exit 1
 
       - name: Run test suite
         id: pytest
