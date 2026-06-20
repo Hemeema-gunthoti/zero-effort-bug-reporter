@@ -278,3 +278,151 @@ def _send(to_email: str, subject: str, html: str, ticket_key: str) -> dict:
 
 def _is_configured() -> bool:
     return bool(SMTP_USERNAME and SMTP_PASSWORD)
+
+
+def send_ai_fix_proposal_email(pr_url: str, run_number: str, to_email: str) -> bool:
+    """Send email when AI fix is proposed and needs human approval."""
+    try:
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        import smtplib
+        import os
+
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f'🤖 AI Fix Proposal - Run #{run_number} - Approval Required'
+        msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
+        msg['To'] = to_email
+
+        html = f'''
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                <h2 style="color: #4f46e5;">🤖 AI Fix Proposal</h2>
+                <p>The AI Fix Agent has analyzed the failing tests and proposed code changes.</p>
+                
+                <div style="background: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
+                    <h3 style="margin-top: 0; color: #92400e;">⏳ Human Approval Required</h3>
+                    <p><strong>Pull Request:</strong> <a href="{pr_url}" style="color: #4f46e5;">{pr_url}</a></p>
+                    <p><strong>Run Number:</strong> #{run_number}</p>
+                </div>
+
+                <h3 style="color: #374151;">How to Approve:</h3>
+                <ol style="padding-left: 20px;">
+                    <li>Review the code changes in the PR</li>
+                    <li>Go to <strong>Actions</strong> tab in your repo</li>
+                    <li>Select <strong>CI/CD — Test-First Gated Deploy</strong></li>
+                    <li>Click <strong>Run workflow</strong></li>
+                    <li>Select <strong>approve-ai-fix</strong></li>
+                </ol>
+
+                <h3 style="color: #374151;">How to Reject:</h3>
+                <ol style="padding-left: 20px;">
+                    <li>Same steps, but select <strong>reject-ai-fix</strong></li>
+                    <li>Jira ticket will remain open for manual fix</li>
+                </ol>
+            </div>
+        </body>
+        </html>
+        '''
+
+        msg.attach(MIMEText(html, 'html'))
+
+        with smtplib.SMTP(os.getenv('SMTP_SERVER', 'smtp.gmail.com'), int(os.getenv('SMTP_PORT', '587'))) as server:
+            server.starttls()
+            server.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
+            server.send_message(msg)
+
+        print(f"📧 AI fix proposal email sent to {to_email}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to send AI fix proposal email: {e}")
+        return False
+
+
+def send_ai_fix_resolved_email(ticket_key: str, to_email: str) -> bool:
+    """Send email when AI fix is approved, merged, and deployed."""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        import os
+
+        msg = MIMEText(f'''
+✅ Bug Resolved — AI Fix Deployed
+
+Ticket: {ticket_key}
+Status: RESOLVED
+
+The AI-generated fix was approved by a human reviewer, passed all tests,
+and has been deployed to production.
+
+No further action required.
+        ''')
+        msg['Subject'] = f'✅ {ticket_key} Resolved — AI Fix Deployed'
+        msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
+        msg['To'] = to_email
+
+        with smtplib.SMTP(os.getenv('SMTP_SERVER', 'smtp.gmail.com'), int(os.getenv('SMTP_PORT', '587'))) as server:
+            server.starttls()
+            server.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
+            server.send_message(msg)
+
+        print(f"📧 Resolution email sent to {to_email}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to send resolution email: {e}")
+        return False
+
+
+def send_manual_fix_required_email(ticket_key: str, jira_url: str, to_email: str) -> bool:
+    """Send email when AI cannot fix and manual intervention is needed."""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        import os
+
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f'🔧 Manual Fix Required — {ticket_key}'
+        msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
+        msg['To'] = to_email
+
+        html = f'''
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                <h2 style="color: #dc2626;">🔧 Manual Fix Required</h2>
+                <p>The AI Fix Agent was unable to generate an automatic fix for the failing tests.</p>
+                
+                <div style="background: #fee2e2; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc2626;">
+                    <h3 style="margin-top: 0; color: #991b1b;">Jira Ticket</h3>
+                    <p><strong>Ticket:</strong> <a href="{jira_url}/browse/{ticket_key}" style="color: #dc2626;">{ticket_key}</a></p>
+                </div>
+
+                <h3 style="color: #374151;">Next Steps:</h3>
+                <ol style="padding-left: 20px;">
+                    <li>Review the Jira ticket for failure details</li>
+                    <li>Fix the issue in your local environment</li>
+                    <li>Push the fix to the <code>main</code> branch</li>
+                    <li>CI will automatically test and deploy</li>
+                </ol>
+
+                <p style="background: #f0fdf4; padding: 10px; border-radius: 6px; color: #166534;">
+                    💡 <strong>Tip:</strong> Include <code>fix:</code> in your commit message for faster processing.
+                </p>
+            </div>
+        </body>
+        </html>
+        '''
+
+        msg.attach(MIMEText(html, 'html'))
+
+        with smtplib.SMTP(os.getenv('SMTP_SERVER', 'smtp.gmail.com'), int(os.getenv('SMTP_PORT', '587'))) as server:
+            server.starttls()
+            server.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
+            server.send_message(msg)
+
+        print(f"📧 Manual fix email sent to {to_email}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to send manual fix email: {e}")
+        return False

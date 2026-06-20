@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: bug-reporter-demo
+    name: zero-effort-bug-reporter
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app.main:app
