@@ -74,59 +74,41 @@ jobs:
       - name: Prepare directories
         run: mkdir -p artifacts/{screenshots,stacktraces,logs,bug_reports,ai_fixes}
 
-      - name: Test Flask minimal
-        run: |
-          python -c "
-          from flask import Flask
-          app = Flask(__name__)
-          
-          @app.route('/health')
-          def health():
-              return {'status': 'ok'}
-          
-          print('Flask imported OK')
-          print('Starting on port 5000...')
-          app.run(host='0.0.0.0', port=5000)
-          " > test_flask.log 2>&1 &
-          sleep 3
-          curl http://localhost:5000/health || echo "Failed"
-          cat test_flask.log
-      
       - name: Debug run Flask
         run: |
           cd app && python main.py &
           sleep 3
           curl -v http://localhost:5000/health || true
-      
+
       - name: Start Flask app
         run: |
           # Debug: Check everything
           echo "=== Python version ==="
           python --version
-          
+
           echo "=== Check app/main.py exists ==="
           ls -la app/main.py
-          
+
           echo "=== Check templates ==="
           ls -la app/templates/ 2>/dev/null || echo "No templates dir"
-          
+
           echo "=== Check requirements ==="
           pip list | grep -i flask
-          
+
           echo "=== Try running in foreground for 3 seconds ==="
           timeout 3 python app/main.py 2>&1 || echo "Exit code: $?"
-          
+
           echo "=== Try with explicit python3 ==="
           python3 app/main.py > flask.log 2>&1 &
           echo "FLASK_PID=$!" >> $GITHUB_ENV
           sleep 5
-          
+
           echo "=== Check process ==="
           ps aux | grep -E "python.*main" | grep -v grep || echo "No main.py process"
-          
+
           echo "=== Check logs ==="
           cat flask.log 2>/dev/null || echo "No log file"
-          
+
           echo "=== Check port ==="
           ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || echo "Port 5000 not listening"
 
@@ -158,10 +140,12 @@ jobs:
           pytest tests/ -v --tb=short \
             --json-report --json-report-file=artifacts/test_report.json \
             2>&1 | tee artifacts/test_output.txt
+
       - name: Check templates exist
         run: |
           ls -la app/templates/ || echo "❌ templates directory missing"
           ls -la app/templates/*.html || echo "❌ No HTML templates found"
+
       - name: Analyze results
         id: test_result
         run: |
@@ -342,7 +326,7 @@ jobs:
           FIX_MODE: propose-only
         run: |
           python main.py
-          
+
           # FIX: Read ticket keys from GITHUB_ENV (written by main.py)
           if [ -f "$GITHUB_ENV" ]; then
             TICKET=$(grep '^JIRA_TICKET=' "$GITHUB_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
@@ -351,12 +335,12 @@ jobs:
             TICKET=""
             TICKETS=""
           fi
-          
+
           # Fallback: try to extract from bug report files if env not set
           if [ -z "$TICKET" ]; then
             TICKET=$(ls artifacts/bug_reports/ 2>/dev/null | head -1 | grep -oE '[A-Z]+-[0-9]+' || echo "UNKNOWN")
           fi
-          
+
           echo "ticket_key=$TICKET" >> $GITHUB_OUTPUT
           echo "ticket_keys=$TICKETS" >> $GITHUB_OUTPUT
           echo "🎫 Jira ticket(s): $TICKETS"
@@ -385,11 +369,11 @@ jobs:
           import sys, os, glob
           sys.path.insert(0, '.')
           from agent.ai_fix_agent import AIFixAgent
-          
+
           agent = AIFixAgent()
           bug_report_files = sorted(glob.glob('artifacts/bug_reports/bug_report_*.json'))
           print(f'Found {len(bug_report_files)} bug reports to analyze')
-          
+
           fix_applied = False
           for br_path in bug_report_files:
               print(f'Processing: {os.path.basename(br_path)}')
@@ -400,7 +384,7 @@ jobs:
                       fix_applied = True
               except Exception as e:
                   print(f'Error processing {br_path}: {e}')
-          
+
           # Create marker file if any fix was proposed
           if fix_applied:
               os.makedirs('artifacts/ai_fixes', exist_ok=True)
@@ -408,7 +392,7 @@ jobs:
                   f.write('fix_proposed')
               print('Fix marker created')
           "
-          
+
           if [ -f "artifacts/ai_fixes/fix_applied.txt" ]; then
             echo "fix_created=true" >> $GITHUB_OUTPUT
           else
@@ -424,12 +408,12 @@ jobs:
         run: |
           # FIX: Configure git with PAT authentication
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
-          
+
           BRANCH="ai-fix-${{ github.run_id }}"
           git config user.name "AI Fix Bot"
           git config user.email "ai-fix@bot.com"
           git checkout -b "$BRANCH"
-          
+
           # FIX: Only apply actual code fixes (not metadata/artifacts)
           for f in artifacts/ai_fixes/fix_app_*; do
             [ -f "$f" ] || continue
@@ -439,19 +423,19 @@ jobs:
               git add "$ORIGINAL"
             fi
           done
-          
+
           # FIX: Verify only source files are staged
           echo "=== Staged files ==="
           git diff --cached --name-only
-          
+
           git commit -m "🤖 AI Fix Proposal [RUN-${{ github.run_id }}]
 
           Fixes for failing tests. Awaiting human approval.
 
           Jira Ticket: ${{ steps.bug_report.outputs.ticket_key }}
-          
+
           To approve: Run workflow_dispatch with 'approve-ai-fix'"
-          
+
           # FIX: Push with explicit token authentication
           git push origin "$BRANCH" || {
             echo "❌ First push failed, retrying..."
@@ -596,17 +580,53 @@ jobs:
           ref: refs/pull/${{ steps.find_pr.outputs.pr }}/head
           token: ${{ secrets.PAT_TOKEN }}
 
-      # FIX: Install dependencies first
+      # FIX: Pin the same Python version used in build-and-test.
+      # This job was previously missing setup-python entirely, leaving it
+      # to whatever default Python the runner image shipped with.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # FIX: Start Flask app BEFORE running tests
+      # FIX: Synchronous diagnostic so any import-time crash prints a
+      # full traceback to the visible log instead of vanishing.
+      - name: Diagnose environment before starting Flask
+        run: |
+          echo "=== pwd / files ==="
+          pwd
+          ls -la
+          ls -la app/
+          echo "=== templates ==="
+          ls -la app/templates/ 2>/dev/null || echo "❌ No templates dir"
+          echo "=== flask install ==="
+          pip show flask || echo "❌ Flask not installed"
+          echo "=== import test (synchronous) ==="
+          python -c "import sys; sys.path.insert(0,'.'); import app.main" 2>&1 || echo "❌ Import of app.main failed — see traceback above"
+
+      # FIX: Use the SAME startup method as build-and-test
+      # (python app/main.py), not `flask run`, for consistency.
+      # -u disables stdout/stderr buffering so crashes are captured
+      # in flask.log even if the process dies almost immediately.
+      # nohup detaches the process so it survives the step's shell exiting.
       - name: Start Flask app
         run: |
-          export FLASK_APP=app/main.py
-          nohup python -m flask run --host=0.0.0.0 --port=5000 > flask.log 2>&1 &
-          echo "FLASK_PID=$!" >> $GITHUB_ENV
-          sleep 3
+          set -x
+          python -m py_compile app/main.py
+          nohup python -u app/main.py > flask.log 2>&1 &
+          echo $! > flask.pid
+          echo "FLASK_PID=$(cat flask.pid)" >> $GITHUB_ENV
+          sleep 2
+          echo "=== Immediate liveness check ==="
+          if ! kill -0 "$(cat flask.pid)" 2>/dev/null; then
+            echo "❌ Flask process died within 2 seconds of starting"
+            cat flask.log
+            exit 1
+          fi
+          echo "✅ Process still alive after 2s"
 
       - name: Wait for Flask healthy
         run: |
@@ -616,10 +636,15 @@ jobs:
               echo "✅ Flask ready"
               exit 0
             fi
+            if ! kill -0 "$(cat flask.pid)" 2>/dev/null; then
+              echo "❌ Flask process died while waiting for health check"
+              cat flask.log
+              exit 1
+            fi
             echo "⏳ Waiting for Flask... ($i/30) - HTTP: $HTTP_CODE"
             sleep 1
           done
-          echo "❌ Flask failed to start"
+          echo "❌ Flask failed to become healthy in time"
           cat flask.log 2>/dev/null || true
           exit 1
 
@@ -637,10 +662,15 @@ jobs:
             echo "passed=false" >> $GITHUB_OUTPUT
           fi
 
+      # FIX: Always show Flask log on test failure for visibility
+      - name: Dump Flask log if tests failed
+        if: steps.test_fix.outputs.passed == 'false'
+        run: cat flask.log 2>/dev/null || echo "No Flask log found"
+
       # FIX: Cleanup Flask after tests
       - name: Cleanup Flask
         if: always()
-        run: kill $FLASK_PID 2>/dev/null || true
+        run: kill "$(cat flask.pid 2>/dev/null)" 2>/dev/null || true
 
       - name: Merge if tests pass
         if: steps.test_fix.outputs.passed == 'true'
@@ -653,22 +683,22 @@ jobs:
         run: |
           PR_BODY=$(gh pr view ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-          
+
           gh pr merge ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --squash --delete-branch
           echo "✅ AI fix merged"
-          
+
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"body":"✅ RESOLVED by AI Fix Agent. Fix approved by human reviewer and auto-merged. Deploying to production."}' \
             "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
-          
+
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"transition":{"id":"31"}}' \
             "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/transitions" || true
-          
+
           echo "🎫 Jira ticket $TICKET marked as resolved"
 
       - name: Close PR if tests fail
@@ -682,10 +712,10 @@ jobs:
         run: |
           PR_NUM=${{ steps.find_pr.outputs.pr }}
           gh pr comment $PR_NUM --repo ${{ github.repository }} --body "❌ AI fix failed auto-tests. Needs revision."
-          
+
           PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-          
+
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
@@ -713,16 +743,16 @@ jobs:
           PR_NUM=$(gh pr list --repo ${{ github.repository }} --search "AI Fix" --state open --json number --jq '.[0].number')
           PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-          
+
           gh pr close $PR_NUM --repo ${{ github.repository }} --comment "❌ Rejected by human reviewer. Manual fix required."
-          
+
           # FIX: Use v2 plain text format
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"body":"🤖 AI fix was rejected by human reviewer. Manual developer fix required."}' \
             "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
-          
+
           echo "✅ AI fix rejected, Jira updated"
 
   # ═════════════════════════════════════════════════════════════════
