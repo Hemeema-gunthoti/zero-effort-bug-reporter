@@ -58,14 +58,14 @@ def dashboard():
 def list_items():
     return render_template("items.html", items=ITEMS)
 
-@app.route("/items/<item_id>")  # ← FIXED: was "/items/" missing <item_id>
+@app.route("/items/<item_id>")
 @login_required
 def item_detail(item_id):
     if item_id not in ITEMS:
         return render_template("item_detail.html", error="Item not found"), 404
     return render_template("item_detail.html", item=ITEMS[item_id], item_id=item_id)
 
-@app.route("/api/items/<item_id>")  # ← FIXED: was "/api/items/" missing <item_id>
+@app.route("/api/items/<item_id>")
 def get_item(item_id):
     if item_id not in ITEMS:
         return jsonify({"error": "Item not found", "status": 404}), 404
@@ -75,10 +75,10 @@ def get_item(item_id):
 def api_list_items():
     return jsonify({"items": ITEMS, "count": len(ITEMS)})
 
+# FIX: Use jsonify for proper JSON response
 @app.route('/health')
 def health():
-    return {'status': 'ok'}, 200
-    
-# add commit 
+    return jsonify({'status': 'ok'}), 200
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
