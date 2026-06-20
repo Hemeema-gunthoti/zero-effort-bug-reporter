@@ -307,6 +307,7 @@ jobs:
 
       # ── Step 2: Run AI Fix Agent (separate step, reads from bug_reports) ─
       # FIX: Now runs AFTER bug reporter but uses bug_reports/ (not raw artifacts)
+      # FIX: Uses propose_fix() method which reads bug report JSON
       - name: Run AI Fix Agent
         id: ai_fix
         env:
@@ -456,6 +457,7 @@ jobs:
           "
 
       # ── FIX: Update Jira only if we have a valid ticket key ─────
+      # FIX: Use v2 plain text format (not v3 ADF format) to avoid INVALID_INPUT
       - name: Update Jira for manual fix
         if: steps.ai_fix.outputs.fix_created == 'false' && steps.bug_report.outputs.ticket_key != '' && steps.bug_report.outputs.ticket_key != 'UNKNOWN'
         env:
@@ -465,11 +467,12 @@ jobs:
           TICKET: ${{ steps.bug_report.outputs.ticket_key }}
         run: |
           echo "Updating Jira ticket: $TICKET"
+          # FIX: Use v2 plain text format (not v3 ADF format)
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"🤖 AI Fix Agent could not generate an automatic fix. Manual developer intervention required."}]}]}}' \
-            "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/comment" || true
+            -d '{"body":"🤖 AI Fix Agent could not generate an automatic fix. Manual developer intervention required."}' \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
           echo "📝 Jira updated: Manual fix needed"
 
       # ── FIX: Warning if no valid ticket was created ─────────────
@@ -533,11 +536,12 @@ jobs:
           gh pr merge ${{ steps.find_pr.outputs.pr }} --squash --delete-branch
           echo "✅ AI fix merged"
           
+          # FIX: Use v2 plain text format
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"✅ RESOLVED by AI Fix Agent. Fix approved by human reviewer and auto-merged. Deploying to production.\"}]}]}}" \
-            "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/comment" || true
+            -d '{"body":"✅ RESOLVED by AI Fix Agent. Fix approved by human reviewer and auto-merged. Deploying to production."}' \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
           
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
@@ -561,11 +565,12 @@ jobs:
           PR_BODY=$(gh pr view $PR_NUM --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
           
+          # FIX: Use v2 plain text format
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"❌ AI fix was approved but failed auto-tests. Fix needs revision.\"}]}]}}" \
-            "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/comment" || true
+            -d '{"body":"❌ AI fix was approved but failed auto-tests. Fix needs revision."}' \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
 
   # ═════════════════════════════════════════════════════════════════
   # JOB 4: REJECT AI FIX (Manual trigger)
@@ -589,11 +594,12 @@ jobs:
           
           gh pr close $PR_NUM --comment "❌ Rejected by human reviewer. Manual fix required."
           
+          # FIX: Use v2 plain text format
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"🤖 AI fix was rejected by human reviewer. Manual developer fix required.\"}]}]}}" \
-            "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/comment" || true
+            -d '{"body":"🤖 AI fix was rejected by human reviewer. Manual developer fix required."}' \
+            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
           
           echo "✅ AI fix rejected, Jira updated"
 
