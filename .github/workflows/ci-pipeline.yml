@@ -20,10 +20,12 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
+
+# FIX: Add permissions for GITHUB_TOKEN (fallback if PAT not set)
 permissions:
-  contents: write        # Required to push branches
-  pull-requests: write   # Required to create PRs
-  issues: write          # Required for PR comments  
+  contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
   # ═════════════════════════════════════════════════════════════════
@@ -254,7 +256,6 @@ jobs:
         run: rm -f artifacts/dedup_cache.json
 
       # ── Step 1: Run Bug Reporter (creates Jira ticket) ──────────
-      # FIX: Added id, proper env vars, and outputs
       - name: Run Bug Reporter Agent
         id: bug_report
         env:
@@ -273,7 +274,6 @@ jobs:
           APP_URL: http://localhost:5000
           GITHUB_ACTOR: ${{ github.actor }}
           GIT_AUTHOR_EMAIL: ${{ github.event.pusher.email }}
-          # FIX: Enable AI fix in bug reporter so it runs BEFORE cleanup
           ENABLE_AI_FIX: "true"
           FIX_MODE: propose-only
         run: |
@@ -310,8 +310,6 @@ jobs:
           retention-days: 7
 
       # ── Step 2: Run AI Fix Agent (separate step, reads from bug_reports) ─
-      # FIX: Now runs AFTER bug reporter but uses bug_reports/ (not raw artifacts)
-      # FIX: Uses propose_fix() method which reads bug report JSON
       - name: Run AI Fix Agent
         id: ai_fix
         env:
@@ -353,13 +351,15 @@ jobs:
             echo "fix_created=false" >> $GITHUB_OUTPUT
           fi
 
-                # ── Step 3: Create PR with AI Fix ───────────────────────────
+      # ── FIX: Step 3: Create PR with AI Fix (uses PAT_TOKEN) ─────
       - name: Create AI Fix PR
         if: steps.ai_fix.outputs.fix_created == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # FIX: Use PAT_TOKEN for PR creation (GITHUB_TOKEN cannot create PRs)
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          # Configure git with token authentication
+          # FIX: Configure git with PAT authentication
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
           
           BRANCH="ai-fix-${{ github.run_id }}"
@@ -367,7 +367,7 @@ jobs:
           git config user.email "ai-fix@bot.com"
           git checkout -b "$BRANCH"
           
-          # Only apply actual code fixes (not metadata/artifacts)
+          # FIX: Only apply actual code fixes (not metadata/artifacts)
           for f in artifacts/ai_fixes/fix_app_*; do
             [ -f "$f" ] || continue
             ORIGINAL=$(basename "$f" | sed 's/^fix_//' | sed 's/_/\//g')
@@ -377,7 +377,7 @@ jobs:
             fi
           done
           
-          # Verify only source files are staged
+          # FIX: Verify only source files are staged
           echo "=== Staged files ==="
           git diff --cached --name-only
           
@@ -389,14 +389,18 @@ jobs:
           
           To approve: Run workflow_dispatch with 'approve-ai-fix'"
           
-          # Push with retry
+          # FIX: Push with explicit token authentication
           git push origin "$BRANCH" || {
             echo "❌ First push failed, retrying..."
             sleep 2
             git push origin "$BRANCH"
           }
 
+          # FIX: Authenticate gh CLI with PAT before creating PR
+          echo "${GH_TOKEN}" | gh auth login --with-token
+          
           PR_URL=$(gh pr create \
+            --repo ${{ github.repository }} \
             --title "🤖 AI Fix: Run #${{ github.run_id }} | Ticket: ${{ steps.bug_report.outputs.ticket_key }}" \
             --body "## AI-Generated Fix Proposal
 
@@ -487,7 +491,7 @@ jobs:
           TICKET: ${{ steps.bug_report.outputs.ticket_key }}
         run: |
           echo "Updating Jira ticket: $TICKET"
-          # FIX: Use v2 plain text format (not v3 ADF format)
+          # FIX: Use v2 plain text format
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
@@ -518,8 +522,12 @@ jobs:
       - name: Find AI fix PR
         id: find_pr
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # FIX: Use PAT_TOKEN for gh CLI operations
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
+          # FIX: Authenticate gh CLI with PAT
+          echo "${GH_TOKEN}" | gh auth login --with-token
           PR_NUM=$(gh pr list --repo ${{ github.repository }} --search "AI Fix" --state open --json number --jq '.[0].number')
           echo "pr=$PR_NUM" >> $GITHUB_OUTPUT
 
@@ -527,6 +535,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ steps.find_pr.outputs.pr }}/head
+          # FIX: Use PAT for checkout
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Test the AI fix
         id: test_fix
@@ -545,15 +555,20 @@ jobs:
       - name: Merge if tests pass
         if: steps.test_fix.outputs.passed == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # FIX: Use PAT_TOKEN for gh CLI operations
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
         run: |
-          PR_BODY=$(gh pr view ${{ steps.find_pr.outputs.pr }} --json body --jq '.body')
+          # FIX: Authenticate gh CLI with PAT
+          echo "${GH_TOKEN}" | gh auth login --with-token
+          
+          PR_BODY=$(gh pr view ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
           
-          gh pr merge ${{ steps.find_pr.outputs.pr }} --squash --delete-branch
+          gh pr merge ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --squash --delete-branch
           echo "✅ AI fix merged"
           
           # FIX: Use v2 plain text format
@@ -574,15 +589,17 @@ jobs:
       - name: Close PR if tests fail
         if: steps.test_fix.outputs.passed == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # FIX: Use PAT_TOKEN for gh CLI operations
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
         run: |
           PR_NUM=${{ steps.find_pr.outputs.pr }}
-          gh pr comment $PR_NUM --body "❌ AI fix failed auto-tests. Needs revision."
+          gh pr comment $PR_NUM --repo ${{ github.repository }} --body "❌ AI fix failed auto-tests. Needs revision."
           
-          PR_BODY=$(gh pr view $PR_NUM --json body --jq '.body')
+          PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
           
           # FIX: Use v2 plain text format
@@ -603,16 +620,21 @@ jobs:
     steps:
       - name: Close AI fix PR
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # FIX: Use PAT_TOKEN for gh CLI operations
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
         run: |
+          # FIX: Authenticate gh CLI with PAT
+          echo "${GH_TOKEN}" | gh auth login --with-token
+          
           PR_NUM=$(gh pr list --repo ${{ github.repository }} --search "AI Fix" --state open --json number --jq '.[0].number')
-          PR_BODY=$(gh pr view $PR_NUM --json body --jq '.body')
+          PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
           
-          gh pr close $PR_NUM --comment "❌ Rejected by human reviewer. Manual fix required."
+          gh pr close $PR_NUM --repo ${{ github.repository }} --comment "❌ Rejected by human reviewer. Manual fix required."
           
           # FIX: Use v2 plain text format
           curl -s -X POST \
