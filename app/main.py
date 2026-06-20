@@ -35,7 +35,7 @@ def login():
     password = request.form.get("password", "")
     if username in USERS and USERS[username] == password:
         session["user"] = username
-        return jsonify({"status": "success", "redirect": "/dashboard"})
+        return jsonify({"status": "success", "redirect": "/dashboard"}), 200
     return jsonify({"status": "error", "message": "Invalid credentials"}), 401
 
 @app.route("/logout")
@@ -68,17 +68,8 @@ def item_detail(item_id):
 @app.route("/api/items/<item_id>")
 def get_item(item_id):
     if item_id not in ITEMS:
-        return jsonify({"error": "Item not found", "status": 404}), 404
-    return jsonify({"item": ITEMS[item_id]})
-
-@app.route("/api/items")
-def api_list_items():
-    return jsonify({"items": ITEMS, "count": len(ITEMS)})
-
-# FIX: Use jsonify for proper JSON response
-@app.route('/health')
-def health():
-    return jsonify({'status': 'ok'}), 200
+        return jsonify({"error": "Item not found"}), 404
+    return jsonify(ITEMS[item_id])
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(debug=True)
