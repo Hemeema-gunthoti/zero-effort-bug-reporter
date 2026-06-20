@@ -2,11 +2,13 @@
 pytest>=7.4.0
 selenium>=4.15.0
 pytest-html>=4.0.0
+pytest-json-report>=1.5.0
 
 # Web app
 Flask>=3.0.0
 gunicorn>=21.0.0
-# AI — Groq (OpenAI-compatible)
+
+# AI — Groq
 groq>=0.9.0
 
 # MCP
@@ -15,11 +17,8 @@ mcp>=1.0.0
 # HTTP
 httpx>=0.27.0
 
-# Notifications
-# (Slack removed — email only via built-in smtplib)
-
-# Redis (deduplication + caching)
-redis>=5.0.0
+# Redis REMOVED — using file-based cache instead
+# redis>=5.0.0
 
 # Utilities
 python-dotenv>=1.0.0
