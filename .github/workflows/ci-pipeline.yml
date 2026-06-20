@@ -74,12 +74,6 @@ jobs:
       - name: Prepare directories
         run: mkdir -p artifacts/{screenshots,stacktraces,logs,bug_reports,ai_fixes}
 
-      - name: Debug run Flask
-        run: |
-          cd app && python main.py &
-          sleep 3
-          curl -v http://localhost:5000/health || true
-
       - name: Start Flask app
         run: |
           # Debug: Check everything
