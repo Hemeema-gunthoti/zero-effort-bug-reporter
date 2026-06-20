@@ -511,7 +511,7 @@ jobs:
           echo "  - Bug reporter did not export ticket key"
           exit 0
 
-    # ═════════════════════════════════════════════════════════════════
+  # ═════════════════════════════════════════════════════════════════
   # JOB 3: APPROVE AI FIX (Manual trigger)
   # ═════════════════════════════════════════════════════════════════
   approve-ai-fix:
@@ -526,7 +526,6 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          # FIX: gh CLI automatically uses GH_TOKEN - no explicit login needed
           PR_NUM=$(gh pr list --repo ${{ github.repository }} --search "AI Fix" --state open --json number --jq '.[0].number')
           echo "pr=$PR_NUM" >> $GITHUB_OUTPUT
 
@@ -536,19 +535,51 @@ jobs:
           ref: refs/pull/${{ steps.find_pr.outputs.pr }}/head
           token: ${{ secrets.PAT_TOKEN }}
 
+      # FIX: Install dependencies first
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # FIX: Start Flask app BEFORE running tests
+      - name: Start Flask app
+        run: |
+          export FLASK_APP=app/main.py
+          nohup python -m flask run --host=0.0.0.0 --port=5000 > flask.log 2>&1 &
+          echo "FLASK_PID=$!" >> $GITHUB_ENV
+          sleep 3
+
+      - name: Wait for Flask healthy
+        run: |
+          for i in {1..30}; do
+            HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:5000/health 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Flask ready"
+              exit 0
+            fi
+            echo "⏳ Waiting for Flask... ($i/30) - HTTP: $HTTP_CODE"
+            sleep 1
+          done
+          echo "❌ Flask failed to start"
+          cat flask.log 2>/dev/null || true
+          exit 1
+
+      # FIX: Now run tests with Flask running
       - name: Test the AI fix
         id: test_fix
         continue-on-error: true
+        env:
+          APP_URL: http://localhost:5000
         run: |
-          pip install -r requirements.txt
-          python app/main.py &
-          sleep 5
           pytest tests/ -v --tb=short 2>&1 | tee ai_fix_test.txt
           if grep -q "passed" ai_fix_test.txt && ! grep -qE "(failed|error)" ai_fix_test.txt; then
             echo "passed=true" >> $GITHUB_OUTPUT
           else
             echo "passed=false" >> $GITHUB_OUTPUT
           fi
+
+      # FIX: Cleanup Flask after tests
+      - name: Cleanup Flask
+        if: always()
+        run: kill $FLASK_PID 2>/dev/null || true
 
       - name: Merge if tests pass
         if: steps.test_fix.outputs.passed == 'true'
@@ -559,14 +590,12 @@ jobs:
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
         run: |
-          # FIX: gh CLI automatically uses GH_TOKEN - no explicit login needed
           PR_BODY=$(gh pr view ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
           
           gh pr merge ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --squash --delete-branch
           echo "✅ AI fix merged"
           
-          # FIX: Use v2 plain text format
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
@@ -596,7 +625,6 @@ jobs:
           PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
           
-          # FIX: Use v2 plain text format
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
