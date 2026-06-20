@@ -351,7 +351,7 @@ jobs:
             echo "fix_created=false" >> $GITHUB_OUTPUT
           fi
 
-            # ── FIX: Step 3: Create PR with AI Fix (uses PAT_TOKEN) ─────
+      # ── FIX: Step 3: Create PR with AI Fix (uses PAT_TOKEN) ─────
       - name: Create AI Fix PR
         if: steps.ai_fix.outputs.fix_created == 'true'
         env:
@@ -434,7 +434,8 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
-          TO_EMAIL: ${{ github.event.pusher.email || secrets.SMTP_USERNAME }}
+          # FIX: Use SMTP_USERNAME as fallback instead of noreply GitHub email
+          TO_EMAIL: ${{ secrets.SMTP_USERNAME }}
           JIRA_URL: ${{ secrets.JIRA_BASE_URL }}/browse/${{ steps.bug_report.outputs.ticket_key }}
           PR_URL: ${{ steps.ai_fix.outputs.pr_url || 'N/A' }}
           TICKET: ${{ steps.bug_report.outputs.ticket_key }}
@@ -458,7 +459,7 @@ jobs:
             </div>
             <h3 style=\"color: #4f46e5;\">🤖 AI Fix Proposal</h3>
             <p>An AI-generated fix has been proposed for review.</p>
-            <p><strong>PR:</strong> <a href=\"{os.getenv(\"PR_URL\")}\">{os.getenv(\"PR_URL\")}</a></p>
+            <p><strong>PR:</strong> {os.getenv(\"PR_URL\")}</p>
             <h3>Next Steps:</h3>
             <ol>
               <li>Review the PR code changes</li>
@@ -474,7 +475,7 @@ jobs:
             s.starttls()
             s.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
             s.send_message(msg)
-          print('📧 Notification sent')
+          print('📧 Notification sent to: ' + os.getenv('TO_EMAIL'))
           "
 
       # ── FIX: Update Jira only if we have a valid ticket key ─────
@@ -631,7 +632,7 @@ jobs:
             "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
           
           echo "✅ AI fix rejected, Jira updated"
-          
+
   # ═════════════════════════════════════════════════════════════════
   # JOB 5: EMERGENCY ROLLBACK
   # ═════════════════════════════════════════════════════════════════
