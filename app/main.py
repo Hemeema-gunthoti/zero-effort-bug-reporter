@@ -75,9 +75,10 @@ def get_item(item_id):
 def api_list_items():
     return jsonify({"items": ITEMS, "count": len(ITEMS)})
 
-@app.route("/health")
+@app.route('/health')
 def health():
-    return jsonify({"status": "ok"}), 200
+    return {'status': 'ok'}, 200
+    
 # add commit 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
