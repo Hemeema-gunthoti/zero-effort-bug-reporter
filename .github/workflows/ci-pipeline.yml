@@ -20,6 +20,10 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
+permissions:
+  contents: write        # Required to push branches
+  pull-requests: write   # Required to create PRs
+  issues: write          # Required for PR comments  
 
 jobs:
   # ═════════════════════════════════════════════════════════════════
@@ -349,24 +353,34 @@ jobs:
             echo "fix_created=false" >> $GITHUB_OUTPUT
           fi
 
-      # ── Step 3: Create PR with AI Fix ───────────────────────────
+                # ── Step 3: Create PR with AI Fix ───────────────────────────
       - name: Create AI Fix PR
         if: steps.ai_fix.outputs.fix_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Configure git with token authentication
+          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
+          
           BRANCH="ai-fix-${{ github.run_id }}"
           git config user.name "AI Fix Bot"
           git config user.email "ai-fix@bot.com"
           git checkout -b "$BRANCH"
           
-          for f in artifacts/ai_fixes/fix_*; do
+          # Only apply actual code fixes (not metadata/artifacts)
+          for f in artifacts/ai_fixes/fix_app_*; do
             [ -f "$f" ] || continue
-            ORIGINAL=$(basename "$f" | sed 's/fix_//' | sed 's/_/\//g')
-            cp "$f" "$ORIGINAL"
+            ORIGINAL=$(basename "$f" | sed 's/^fix_//' | sed 's/_/\//g')
+            if [[ "$ORIGINAL" == app* ]]; then
+              cp "$f" "$ORIGINAL"
+              git add "$ORIGINAL"
+            fi
           done
           
-          git add -A
+          # Verify only source files are staged
+          echo "=== Staged files ==="
+          git diff --cached --name-only
+          
           git commit -m "🤖 AI Fix Proposal [RUN-${{ github.run_id }}]
 
           Fixes for failing tests. Awaiting human approval.
@@ -374,7 +388,13 @@ jobs:
           Jira Ticket: ${{ steps.bug_report.outputs.ticket_key }}
           
           To approve: Run workflow_dispatch with 'approve-ai-fix'"
-          git push origin "$BRANCH"
+          
+          # Push with retry
+          git push origin "$BRANCH" || {
+            echo "❌ First push failed, retrying..."
+            sleep 2
+            git push origin "$BRANCH"
+          }
 
           PR_URL=$(gh pr create \
             --title "🤖 AI Fix: Run #${{ github.run_id }} | Ticket: ${{ steps.bug_report.outputs.ticket_key }}" \
