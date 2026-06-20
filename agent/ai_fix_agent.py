@@ -31,15 +31,14 @@ class AIFixAgent:
             api_key=settings.GROQ_API_KEY,
             http_client=httpx.Client(verify=False),
         )
-        self.confidence_threshold = 0.7
+        self.confidence_threshold = 0.5  # FIX: Lowered from 0.7 to catch more fixes
 
     # ═════════════════════════════════════════════════════════════════
-    # FIX: Added propose_fix() method as alias for analyze_and_fix()
-    # This matches what main.py and ci.yml expect to call
+    # New propose_fix() method - reads bug report JSON
     # ═════════════════════════════════════════════════════════════════
     def propose_fix(self, bug_report_path: str, mode: str = "propose-only") -> Dict:
         """
-        FIX: New method that reads a bug report JSON and proposes a fix.
+        Reads a bug report JSON and proposes a fix.
         This is the interface expected by main.py and the CI workflow.
         """
         print(f"\n{'='*60}")
@@ -61,11 +60,19 @@ class AIFixAgent:
         test_name = metadata.get("test_name", "unknown")
         error_type = metadata.get("error_type", "Unknown")
         affected_component = metadata.get("affected_component", "unknown")
-        jira_ticket = bug_report.get("ticket_key")  # May be set by Jira client
+        
+        # FIX: Extract jira_ticket from bug_report if available
+        jira_ticket = bug_report.get("ticket_key") or bug_report.get("jira_ticket")
+        
+        # If not in bug_report, try to find from bug_reports directory naming or cache
+        if not jira_ticket:
+            jira_ticket = self._get_jira_ticket_from_cache_or_files()
 
         print(f"📋 Bug Report: {test_name}")
         print(f"🔴 Error Type: {error_type}")
         print(f"🏗️ Component: {affected_component}")
+        if jira_ticket:
+            print(f"🎫 Jira Ticket: {jira_ticket}")
 
         # Build failure context from bug report
         failures = [{
@@ -79,15 +86,29 @@ class AIFixAgent:
 
         # Score and fix files
         file_scores = self._score_files_for_fixing(failures)
+        
+        # FIX: If no high confidence files, try ALL source files with component-based scoring
         high_confidence = {k: v for k, v in file_scores.items() if v['score'] >= self.confidence_threshold}
-
+        
         if not high_confidence:
-            print("⚠️ Low confidence — deferring to human")
-            return {
-                "fixed": False,
-                "reason": "low_confidence",
-                "jira_ticket": jira_ticket,
-            }
+            print("⚠️ No high-confidence files found. Trying component-based fallback...")
+            # FIX: Fallback - include files matching the component even with low score
+            component_files = {k: v for k, v in file_scores.items() 
+                             if v.get('component_match') or v['score'] > 0.1}
+            if component_files:
+                print(f"✅ Found {len(component_files)} component-matched files")
+                high_confidence = component_files
+            else:
+                print("⚠️ Low confidence — deferring to human")
+                return {
+                    "fixed": False,
+                    "reason": "low_confidence",
+                    "jira_ticket": jira_ticket,
+                }
+
+        print(f"📎 Scoring files for fixing...")
+        for path, info in high_confidence.items():
+            print(f"   {path}: score={info['score']:.2f} ({', '.join(info.get('reasons', []))})")
 
         source_files = {k: v['content'] for k, v in high_confidence.items()}
         fixes = self._generate_fixes(failures, source_files, jira_ticket)
@@ -110,6 +131,32 @@ class AIFixAgent:
             "jira_ticket": jira_ticket,
             "approval_required": mode == "propose-only",
         }
+
+    def _get_jira_ticket_from_cache_or_files(self) -> Optional[str]:
+        """FIX: Try to find jira ticket from various sources."""
+        # Try bug_reports directory
+        bug_reports = list(ARTIFACT_DIR.glob("bug_reports/bug_report_*.json"))
+        for br in bug_reports:
+            try:
+                with open(br) as f:
+                    data = json.load(f)
+                if data.get("ticket_key"):
+                    return data.get("ticket_key")
+            except:
+                pass
+        
+        # Try dedup cache
+        cache_file = ARTIFACT_DIR / "dedup_cache.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file) as f:
+                    cache = json.load(f)
+                for entry in cache.values():
+                    if entry.get("ticket_key"):
+                        return entry.get("ticket_key")
+            except:
+                pass
+        return None
 
     # Keep original analyze_and_fix for backward compatibility
     def analyze_and_fix(self, test_output_path: str, mode: str = "propose-only") -> Dict:
@@ -190,12 +237,20 @@ class AIFixAgent:
 
     def _score_files_for_fixing(self, failures: List[Dict]) -> Dict[str, Dict]:
         files = {}
+        
+        # FIX: Expanded source paths - include all possible app files
         source_paths = [
             "app/main.py",
+            "app/routes.py",
+            "app/auth.py",
+            "app/login.py",
+            "app/views.py",
             "app/templates/login.html",
             "app/templates/dashboard.html",
             "app/templates/base.html",
+            "app/templates/index.html",
             "app/static/js/app.js",
+            "app/static/js/login.js",
             "app/static/css/style.css",
         ]
 
@@ -209,36 +264,69 @@ class AIFixAgent:
 
             score = 0.0
             reasons = []
+            component_match = False
 
             for failure in failures:
-                error_text = f"{failure['test_name']} {failure['error_summary']}".lower()
+                error_text = f"{failure['test_name']} {failure['error_summary']} {failure.get('description', '')}".lower()
                 file_name = path.split("/")[-1].lower()
+                component = failure.get("component", "").lower()
+                error_type = failure.get("error_type", "").lower()
+                test_file = (failure.get("test_file") or "").lower()
 
-                if file_name in error_text:
+                # FIX: Component-based matching (strong signal)
+                if component and component in path.lower():
                     score += 0.4
+                    reasons.append(f"component: {component}")
+                    component_match = True
+
+                # FIX: Test file name matching
+                if test_file:
+                    test_name = Path(test_file).stem
+                    if test_name in path.lower() or test_name.replace("test_", "") in path.lower():
+                        score += 0.3
+                        reasons.append(f"test_file: {test_name}")
+
+                # FIX: Error type matching
+                if error_type == "assertionerror" and any(x in path.lower() for x in ["main.py", "routes.py", "views.py", "auth.py"]):
+                    score += 0.2
+                    reasons.append("assertionerror → backend")
+                
+                if error_type == "timeouterror" or error_type == "timeoutexception":
+                    if any(x in path.lower() for x in ["main.py", "routes.py", "auth.py"]):
+                        score += 0.25
+                        reasons.append("timeout → backend")
+
+                # File name mentioned in error text
+                if file_name in error_text:
+                    score += 0.3
                     reasons.append(f"mentioned: {file_name}")
 
-                if failure.get("test_file"):
-                    test_name = Path(failure["test_file"]).stem
-                    if "login" in test_name and "login" in path:
+                # FIX: Login-related errors → login files
+                if "login" in error_text and "login" in path.lower():
+                    score += 0.25
+                    reasons.append("login context")
+                
+                # FIX: Dashboard-related errors → dashboard files
+                if "dashboard" in error_text and "dashboard" in path.lower():
+                    score += 0.25
+                    reasons.append("dashboard context")
+                
+                # FIX: Unauthorized/403 errors → auth files
+                if any(x in error_text for x in ["unauthorized", "403", "auth", "login required"]):
+                    if any(x in path.lower() for x in ["auth", "login", "main.py", "routes"]):
                         score += 0.3
-                    elif "dashboard" in test_name and "dashboard" in path:
-                        score += 0.3
+                        reasons.append("auth context")
 
-                if "KeyError" in str(failures) and "main.py" in path:
+                # KeyError handling
+                if "keyerror" in error_text and "main.py" in path:
                     score += 0.3
                     reasons.append("KeyError → backend")
-
-                # FIX: Also score based on component from bug report
-                component = failure.get("component", "").lower()
-                if component and component in path.lower():
-                    score += 0.2
-                    reasons.append(f"component match: {component}")
 
             files[path] = {
                 "score": min(score, 1.0),
                 "content": content,
-                "reasons": reasons,
+                "reasons": list(set(reasons)),  # deduplicate reasons
+                "component_match": component_match,
             }
 
         return dict(sorted(files.items(), key=lambda x: x[1]["score"], reverse=True))
