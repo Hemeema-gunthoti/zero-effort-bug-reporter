@@ -74,27 +74,61 @@ jobs:
       - name: Prepare directories
         run: mkdir -p artifacts/{screenshots,stacktraces,logs,bug_reports,ai_fixes}
 
+      - name: Test Flask minimal
+        run: |
+          python -c "
+          from flask import Flask
+          app = Flask(__name__)
+          
+          @app.route('/health')
+          def health():
+              return {'status': 'ok'}
+          
+          print('Flask imported OK')
+          print('Starting on port 5000...')
+          app.run(host='0.0.0.0', port=5000)
+          " > test_flask.log 2>&1 &
+          sleep 3
+          curl http://localhost:5000/health || echo "Failed"
+          cat test_flask.log
+      
+      - name: Debug run Flask
+        run: |
+          cd app && python main.py &
+          sleep 3
+          curl -v http://localhost:5000/health || true
+      
       - name: Start Flask app
         run: |
-          # Debug: Check Python file syntax
-          python -m py_compile app/main.py || echo "❌ Syntax error in app/main.py"
+          # Debug: Check everything
+          echo "=== Python version ==="
+          python --version
           
-          # Start Flask and capture ALL output immediately
-          python app/main.py > flask.log 2>&1 &
+          echo "=== Check app/main.py exists ==="
+          ls -la app/main.py
+          
+          echo "=== Check templates ==="
+          ls -la app/templates/ 2>/dev/null || echo "No templates dir"
+          
+          echo "=== Check requirements ==="
+          pip list | grep -i flask
+          
+          echo "=== Try running in foreground for 3 seconds ==="
+          timeout 3 python app/main.py 2>&1 || echo "Exit code: $?"
+          
+          echo "=== Try with explicit python3 ==="
+          python3 app/main.py > flask.log 2>&1 &
           echo "FLASK_PID=$!" >> $GITHUB_ENV
           sleep 5
           
-          # Check if process is still running
-          echo "=== Process check ==="
-          ps aux | grep -E "python.*main" | grep -v grep || echo "No main.py process found"
+          echo "=== Check process ==="
+          ps aux | grep -E "python.*main" | grep -v grep || echo "No main.py process"
           
-          # Check port
-          echo "=== Port check ==="
+          echo "=== Check logs ==="
+          cat flask.log 2>/dev/null || echo "No log file"
+          
+          echo "=== Check port ==="
           ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || echo "Port 5000 not listening"
-          
-          # Show logs immediately
-          echo "=== Flask logs (first 50 lines) ==="
-          cat flask.log 2>/dev/null | head -50 || echo "No log file"
 
       - name: Wait for Flask healthy
         run: |
