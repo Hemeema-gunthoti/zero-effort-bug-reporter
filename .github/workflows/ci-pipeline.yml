@@ -74,7 +74,7 @@ jobs:
       - name: Prepare directories
         run: mkdir -p artifacts/{screenshots,stacktraces,logs,bug_reports,ai_fixes}
 
-            - name: Start Flask app
+      - name: Start Flask app
         run: |
           # FIX: Export FLASK_APP and start with explicit host/port
           export FLASK_APP=app/main.py
