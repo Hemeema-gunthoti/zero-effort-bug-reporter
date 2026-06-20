@@ -222,6 +222,7 @@ jobs:
     timeout-minutes: 25
     outputs:
       jira_ticket: ${{ steps.bug_report.outputs.ticket_key }}
+      jira_tickets: ${{ steps.bug_report.outputs.ticket_keys }}
       ai_fix_created: ${{ steps.ai_fix.outputs.fix_created }}
       pr_number: ${{ steps.ai_fix.outputs.pr_number }}
 
@@ -244,7 +245,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # ── FIX: Clear stale dedup cache before running bug reporter ─
+      - name: 🧹 Clear Stale Dedup Cache
+        run: rm -f artifacts/dedup_cache.json
+
       # ── Step 1: Run Bug Reporter (creates Jira ticket) ──────────
+      # FIX: Added id, proper env vars, and outputs
       - name: Run Bug Reporter Agent
         id: bug_report
         env:
@@ -260,17 +266,47 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
-          REDIS_URL: redis://localhost:6379/0
           APP_URL: http://localhost:5000
           GITHUB_ACTOR: ${{ github.actor }}
           GIT_AUTHOR_EMAIL: ${{ github.event.pusher.email }}
+          # FIX: Enable AI fix in bug reporter so it runs BEFORE cleanup
+          ENABLE_AI_FIX: "true"
+          FIX_MODE: propose-only
         run: |
           python main.py
-          TICKET=$(ls artifacts/bug_reports/ 2>/dev/null | head -1 | grep -oE '[A-Z]+-[0-9]+' || echo "UNKNOWN")
+          
+          # FIX: Read ticket keys from GITHUB_ENV (written by main.py)
+          if [ -f "$GITHUB_ENV" ]; then
+            TICKET=$(grep '^JIRA_TICKET=' "$GITHUB_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
+            TICKETS=$(grep '^JIRA_TICKETS=' "$GITHUB_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
+          else
+            TICKET=""
+            TICKETS=""
+          fi
+          
+          # Fallback: try to extract from bug report files if env not set
+          if [ -z "$TICKET" ]; then
+            TICKET=$(ls artifacts/bug_reports/ 2>/dev/null | head -1 | grep -oE '[A-Z]+-[0-9]+' || echo "UNKNOWN")
+          fi
+          
           echo "ticket_key=$TICKET" >> $GITHUB_OUTPUT
-          echo "🎫 Jira ticket: $TICKET"
+          echo "ticket_keys=$TICKETS" >> $GITHUB_OUTPUT
+          echo "🎫 Jira ticket(s): $TICKETS"
+          echo "🎫 Primary ticket: $TICKET"
 
-      # ── Step 2: Run AI Fix Agent ────────────────────────────────
+      # ── FIX: Upload bug reports before AI fix (preserved after cleanup) ─
+      - name: Upload Bug Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bug-reports-${{ github.run_id }}
+          path: |
+            artifacts/bug_reports/
+            artifacts/dedup_cache.json
+          retention-days: 7
+
+      # ── Step 2: Run AI Fix Agent (separate step, reads from bug_reports) ─
+      # FIX: Now runs AFTER bug reporter but uses bug_reports/ (not raw artifacts)
       - name: Run AI Fix Agent
         id: ai_fix
         env:
@@ -279,11 +315,33 @@ jobs:
           FIX_MODE: propose-only
         run: |
           python -c "
+          import sys, os, glob
+          sys.path.insert(0, '.')
           from agent.ai_fix_agent import AIFixAgent
+          
           agent = AIFixAgent()
-          result = agent.analyze_and_fix('artifacts/test_output.txt', mode='propose-only')
-          print(f'AI Fix result: {result}')
+          bug_report_files = sorted(glob.glob('artifacts/bug_reports/bug_report_*.json'))
+          print(f'Found {len(bug_report_files)} bug reports to analyze')
+          
+          fix_applied = False
+          for br_path in bug_report_files:
+              print(f'Processing: {os.path.basename(br_path)}')
+              try:
+                  result = agent.propose_fix(br_path, mode='propose-only')
+                  print(f'Result: {result}')
+                  if result.get('fixed'):
+                      fix_applied = True
+              except Exception as e:
+                  print(f'Error processing {br_path}: {e}')
+          
+          # Create marker file if any fix was proposed
+          if fix_applied:
+              os.makedirs('artifacts/ai_fixes', exist_ok=True)
+              with open('artifacts/ai_fixes/fix_applied.txt', 'w') as f:
+                  f.write('fix_proposed')
+              print('Fix marker created')
           "
+          
           if [ -f "artifacts/ai_fixes/fix_applied.txt" ]; then
             echo "fix_created=true" >> $GITHUB_OUTPUT
           else
@@ -397,21 +455,33 @@ jobs:
           print('📧 Notification sent')
           "
 
-      # ── Step 5: If AI can't fix, update Jira ────────────────────
+      # ── FIX: Update Jira only if we have a valid ticket key ─────
       - name: Update Jira for manual fix
-        if: steps.ai_fix.outputs.fix_created == 'false'
+        if: steps.ai_fix.outputs.fix_created == 'false' && steps.bug_report.outputs.ticket_key != '' && steps.bug_report.outputs.ticket_key != 'UNKNOWN'
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           TICKET: ${{ steps.bug_report.outputs.ticket_key }}
         run: |
+          echo "Updating Jira ticket: $TICKET"
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"body":{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"🤖 AI Fix Agent could not generate an automatic fix. Manual developer intervention required."}]}]}}' \
             "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/comment" || true
           echo "📝 Jira updated: Manual fix needed"
+
+      # ── FIX: Warning if no valid ticket was created ─────────────
+      - name: ⚠️ No Valid Ticket Warning
+        if: steps.bug_report.outputs.ticket_key == '' || steps.bug_report.outputs.ticket_key == 'UNKNOWN'
+        run: |
+          echo "⚠️ No valid JIRA ticket was created or exported."
+          echo "This may mean:"
+          echo "  - All tests passed (no failures)"
+          echo "  - Ticket creation failed"
+          echo "  - Bug reporter did not export ticket key"
+          exit 0
 
   # ═════════════════════════════════════════════════════════════════
   # JOB 3: APPROVE AI FIX (Manual trigger)

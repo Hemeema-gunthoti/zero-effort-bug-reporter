@@ -1,6 +1,6 @@
 """
 agent/failure_agent.py
------------------------
+----------------------
 Core AI agent — reads failure metadata, calls Groq, produces bug_report.json.
 """
 
@@ -23,9 +23,9 @@ from agent.prompts.analysis_prompt import (
     ANALYSIS_SYSTEM_PROMPT,
     build_analysis_prompt,
 )
-from mcp_server.jira_tools import _make_test_label
+from mcp_server.jira_tools import _make_test_label, _make_dedup_key
 
-ARTIFACT_DIR      = os.path.join(os.path.dirname(__file__), "..", "artifacts")
+ARTIFACT_DIR = os.path.join(os.path.dirname(__file__), "..", "artifacts")
 TEAM_MAPPING_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "team_mapping.json")
 
 
@@ -33,7 +33,7 @@ class FailureAnalysisAgent:
 
     def __init__(self):
         self.client = Groq(
-            api_key     = settings.GROQ_API_KEY,
+            api_key = settings.GROQ_API_KEY,
             http_client = httpx.Client(verify=False),
         )
         self.team_mapping = self._load_team_mapping()
@@ -41,64 +41,64 @@ class FailureAnalysisAgent:
     def analyze_failure(self, metadata_path: str) -> dict:
         print(f"\n{'='*60}")
         print(f"🤖 AI AGENT STARTING")
-        print(f"   Input: {metadata_path}")
+        print(f" Input: {metadata_path}")
         print(f"{'='*60}")
 
-        metadata  = self._load_metadata(metadata_path)
+        metadata = self._load_metadata(metadata_path)
         artifacts = self._load_artifacts(metadata)
 
         print(f"✅ Artifacts loaded")
-        print(f"   Test : {metadata['test_name']}")
-        print(f"   Stack: {len(artifacts['stacktrace'])} chars")
-        print(f"   Logs : {len(artifacts.get('console_logs', ''))} chars")
+        print(f" Test : {metadata['test_name']}")
+        print(f" Stack: {len(artifacts['stacktrace'])} chars")
+        print(f" Logs : {len(artifacts.get('console_logs', ''))} chars")
 
         print(f"\n🧠 Sending to Groq ({settings.GROQ_MODEL})...")
         analysis = self._ai_analyze(artifacts)
         print(f"✅ Groq analysis complete")
-        print(f"   Error type       : {analysis.get('error_type')}")
-        print(f"   Affected component: {analysis.get('affected_component')}")
-        print(f"   Root cause       : {analysis.get('root_cause', '')[:80]}...")
+        print(f" Error type       : {analysis.get('error_type')}")
+        print(f" Affected component: {analysis.get('affected_component')}")
+        print(f" Root cause       : {analysis.get('root_cause', '')[:80]}...")
 
         severity, priority = self._classify(analysis, artifacts["stacktrace"])
-        print(f"\n📊 Classification: severity={severity}  priority={priority}")
+        print(f"\n📊 Classification: severity={severity} priority={priority}")
 
         assignee_info = self._get_assignee(analysis.get("affected_component", "default"))
         print(f"👤 Component assignee: {assignee_info['name']} ({assignee_info['assignee']})")
 
         # ── Git blame — override assignee with whoever broke the line ─
         blame_result = get_blame_assignee(
-            test_file  = metadata.get("file", ""),
+            test_file = metadata.get("file", ""),
             stacktrace = artifacts["stacktrace"],
         )
 
         if not blame_result.get("found"):
-            print(f"   ⚠️  Blame failed ({blame_result.get('reason')}) — trying last pusher...")
+            print(f" ⚠️ Blame failed ({blame_result.get('reason')}) — trying last pusher...")
             blame_result = get_last_pusher()
 
         if blame_result.get("found"):
-            blame_email   = blame_result["email"]
-            blame_name    = blame_result["name"]
-            print(f"   ✅ Blame resolved: {blame_name} <{blame_email}>")
+            blame_email = blame_result["email"]
+            blame_name = blame_result["name"]
+            print(f" ✅ Blame resolved: {blame_name} <{blame_email}>")
 
             # Look up their Jira accountId from email_to_account map
-            email_map     = self.team_mapping.get("email_to_account", {})
+            email_map = self.team_mapping.get("email_to_account", {})
             blame_account = email_map.get(blame_email, {})
 
             if blame_account:
                 # Override assignee with blamed developer
-                assignee_info["assignee"]   = blame_email
-                assignee_info["accountId"]  = blame_account["accountId"]
-                assignee_info["name"]       = blame_account["name"]
+                assignee_info["assignee"] = blame_email
+                assignee_info["accountId"] = blame_account["accountId"]
+                assignee_info["name"] = blame_account["name"]
                 assignee_info["blame_source"] = blame_result.get("source", "git_blame")
-                print(f"   🎯 Assignee overridden → {blame_account['name']}")
+                print(f" 🎯 Assignee overridden → {blame_account['name']}")
             else:
-                print(f"   ⚠️  {blame_email} not in team mapping — keeping component assignee")
-                assignee_info["blame_name"]  = blame_name
+                print(f" ⚠️ {blame_email} not in team mapping — keeping component assignee")
+                assignee_info["blame_name"] = blame_name
                 assignee_info["blame_email"] = blame_email
         else:
-            print(f"   ⚠️  Blame not resolved ({blame_result.get('reason')})")
+            print(f" ⚠️ Blame not resolved ({blame_result.get('reason')})")
 
-        bug_report  = self._build_report(metadata, analysis, severity, priority, assignee_info)
+        bug_report = self._build_report(metadata, analysis, severity, priority, assignee_info)
         output_path = self._save_report(bug_report, metadata["test_name"])
         print(f"\n💾 Bug report saved → {output_path}")
 
@@ -113,8 +113,8 @@ class FailureAnalysisAgent:
     def _load_artifacts(self, metadata: dict) -> dict:
         artifacts = {
             "test_name": metadata["test_name"],
-            "file":      metadata["file"],
-            "duration":  metadata.get("duration", 0),
+            "file": metadata["file"],
+            "duration": metadata.get("duration", 0),
             "timestamp": metadata["timestamp"],
         }
 
@@ -146,62 +146,62 @@ class FailureAnalysisAgent:
 
     def _ai_analyze(self, artifacts: dict) -> dict:
         user_prompt = build_analysis_prompt(
-            test_name    = artifacts["test_name"],
-            test_file    = artifacts["file"],
-            duration     = artifacts["duration"],
-            stacktrace   = artifacts["stacktrace"],
+            test_name = artifacts["test_name"],
+            test_file = artifacts["file"],
+            duration = artifacts["duration"],
+            stacktrace = artifacts["stacktrace"],
             console_logs = artifacts.get("console_logs", ""),
         )
 
         try:
             response = self.client.chat.completions.create(
-                model       = settings.GROQ_MODEL,
-                messages    = [
+                model = settings.GROQ_MODEL,
+                messages = [
                     {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_prompt},
+                    {"role": "user", "content": user_prompt},
                 ],
                 temperature = 0.1,
-                max_tokens  = 1000,
+                max_tokens = 1000,
             )
 
             raw = response.choices[0].message.content.strip()
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$",          "", raw).strip()
+            raw = re.sub(r"\s*```$", "", raw).strip()
             return json.loads(raw)
 
         except json.JSONDecodeError as e:
-            print(f"⚠️  Groq returned non-JSON: {e}")
+            print(f"⚠️ Groq returned non-JSON: {e}")
             return self._fallback_analysis(artifacts)
         except Exception as e:
-            print(f"⚠️  Groq API error: {e}")
+            print(f"⚠️ Groq API error: {e}")
             return self._fallback_analysis(artifacts)
 
     def _fallback_analysis(self, artifacts: dict) -> dict:
-        lines     = artifacts.get("stacktrace", "").strip().split("\n")
+        lines = artifacts.get("stacktrace", "").strip().split("\n")
         last_line = next(
             (l.strip() for l in reversed(lines) if l.strip() and not l.startswith(" ")),
             "Unknown error"
         )
         return {
-            "error_type":         "Unknown",
-            "error_message":      last_line[:200],
-            "root_cause":         "Could not analyze — Groq API unavailable",
+            "error_type": "Unknown",
+            "error_message": last_line[:200],
+            "root_cause": "Could not analyze — Groq API unavailable",
             "affected_component": "unknown",
-            "affected_feature":   "Unknown feature",
-            "user_impact":        "Unknown impact",
+            "affected_feature": "Unknown feature",
+            "user_impact": "Unknown impact",
             "steps_to_reproduce": ["Run the failing test to reproduce"],
-            "expected_behavior":  "Test should pass",
-            "actual_behavior":    last_line[:200],
-            "suggested_fix":      "Review the stack trace manually",
+            "expected_behavior": "Test should pass",
+            "actual_behavior": last_line[:200],
+            "suggested_fix": "Review the stack trace manually",
         }
 
     # ── Classification ────────────────────────────────────────────────
 
     def _classify(self, analysis: dict, stacktrace: str) -> tuple:
-        error_type  = analysis.get("error_type",  "").lower()
-        component   = analysis.get("affected_component", "").lower()
+        error_type = analysis.get("error_type", "").lower()
+        component = analysis.get("affected_component", "").lower()
         user_impact = analysis.get("user_impact", "").lower()
-        root_cause  = analysis.get("root_cause",  "").lower()
+        root_cause = analysis.get("root_cause", "").lower()
 
         CRITICAL_SIGNALS = [
             "payment", "checkout", "data loss", "security",
@@ -216,7 +216,7 @@ class FailureAnalysisAgent:
         ]
 
         combined = f"{error_type} {component} {user_impact} {root_cause} {stacktrace.lower()}"
-        severity  = "Medium"
+        severity = "Medium"
 
         if any(s in combined for s in CRITICAL_SIGNALS):
             severity = "Critical"
@@ -244,19 +244,20 @@ class FailureAnalysisAgent:
 
     def _build_report(
         self,
-        metadata:      dict,
-        analysis:      dict,
-        severity:      str,
-        priority:      str,
+        metadata: dict,
+        analysis: dict,
+        severity: str,
+        priority: str,
         assignee_info: dict,
     ) -> dict:
         test_name = metadata["test_name"]
         component = analysis.get("affected_component", "unknown")
-        feature   = analysis.get("affected_feature",   "Unknown feature")
+        feature = analysis.get("affected_feature", "Unknown feature")
+        error_type = analysis.get("error_type", "Test Failure")
 
         title = (
             f"[{component.upper()}] "
-            f"{analysis.get('error_type', 'Test Failure')}: "
+            f"{error_type}: "
             f"{feature}"
         )
 
@@ -291,46 +292,48 @@ h3. Stack Trace
 {{code}}
 
 h3. Test Details
-* Test: {test_name}
-* File: {metadata.get('file', 'N/A')}
-* Duration: {metadata.get('duration', 0)}s
-* Captured: {metadata.get('timestamp', 'N/A')}
-* Assigned To: {assignee_info.get('name', 'N/A')} ({assignee_info.get('assignee', 'N/A')})
-* Blame Source: {assignee_info.get('blame_source', 'component mapping')}
+\* Test: {test_name}
+\* File: {metadata.get('file', 'N/A')}
+\* Duration: {metadata.get('duration', 0)}s
+\* Captured: {metadata.get('timestamp', 'N/A')}
+\* Assigned To: {assignee_info.get('name', 'N/A')} ({assignee_info.get('assignee', 'N/A')})
+\* Blame Source: {assignee_info.get('blame_source', 'component mapping')}
 
 ---
 _Generated automatically by Zero-Effort Bug Reporter_"""
 
         # Build labels including test dedup label
+        # FIX: Use _make_dedup_key which includes error type for uniqueness
         test_label = _make_test_label(test_name)
-        labels = ["ai-generated", "auto-reported", component, test_label]
-        if analysis.get("error_type"):
-            labels.append(analysis["error_type"].lower().replace("exception", ""))
+        dedup_key = _make_dedup_key(test_name, error_type)
+        labels = ["ai-generated", "auto-reported", component, test_label, dedup_key]
+        if error_type:
+            labels.append(error_type.lower().replace("exception", ""))
         labels = list(dict.fromkeys(l.strip() for l in labels if l.strip()))
 
         return {
-            "jira_project":        settings.JIRA_PROJECT_KEY,
-            "issue_type":          "Bug",
-            "title":               title,
-            "description":         description,
-            "severity":            severity,
-            "priority":            priority,
-            "assignee":            assignee_info.get("assignee", ""),
+            "jira_project": settings.JIRA_PROJECT_KEY,
+            "issue_type": "Bug",
+            "title": title,
+            "description": description,
+            "severity": severity,
+            "priority": priority,
+            "assignee": assignee_info.get("assignee", ""),
             "assignee_account_id": assignee_info.get("accountId", ""),
-            "labels":              labels,
-            "components":          [component],
+            "labels": labels,
+            "components": [component],
             "attachments": {
-                "screenshot":  metadata.get("screenshot_file"),
-                "stacktrace":  metadata.get("stacktrace_file"),
+                "screenshot": metadata.get("screenshot_file"),
+                "stacktrace": metadata.get("stacktrace_file"),
             },
             "metadata": {
-                "test_name":          test_name,
-                "test_file":          metadata.get("file"),
-                "timestamp":          metadata.get("timestamp"),
-                "duration":           metadata.get("duration"),
-                "groq_model":         settings.GROQ_MODEL,
+                "test_name": test_name,
+                "test_file": metadata.get("file"),
+                "timestamp": metadata.get("timestamp"),
+                "duration": metadata.get("duration"),
+                "groq_model": settings.GROQ_MODEL,
                 "affected_component": component,
-                "error_type":         analysis.get("error_type"),
+                "error_type": error_type,
             },
         }
 
@@ -343,7 +346,7 @@ _Generated automatically by Zero-Effort Bug Reporter_"""
             safe = safe.replace(ch, "_")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path      = os.path.join(out_dir, f"bug_report_{safe}_{timestamp}.json")
+        path = os.path.join(out_dir, f"bug_report_{safe}_{timestamp}.json")
 
         with open(path, "w", encoding="utf-8") as f:
             json.dump(bug_report, f, indent=2, ensure_ascii=False)
@@ -353,7 +356,7 @@ _Generated automatically by Zero-Effort Bug Reporter_"""
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python agent/failure_agent.py <metadata_json_path>")
+        print("Usage: python agent/failure_agent.py <metadata.json>")
         sys.exit(1)
 
     metadata_path = sys.argv[1]
@@ -361,18 +364,18 @@ def main():
         print(f"❌ File not found: {metadata_path}")
         sys.exit(1)
 
-    agent  = FailureAnalysisAgent()
+    agent = FailureAnalysisAgent()
     result = agent.analyze_failure(metadata_path)
     report = result["bug_report"]
 
     print(f"\n{'='*60}")
     print(f"✅ BUG REPORT READY")
     print(f"{'='*60}")
-    print(f"  Title    : {report['title']}")
-    print(f"  Severity : {report['severity']}")
-    print(f"  Priority : {report['priority']}")
-    print(f"  Assignee : {report['assignee']}")
-    print(f"  Labels   : {', '.join(report['labels'])}")
+    print(f" Title    : {report['title']}")
+    print(f" Severity : {report['severity']}")
+    print(f" Priority : {report['priority']}")
+    print(f" Assignee : {report['assignee']}")
+    print(f" Labels   : {', '.join(report['labels'])}")
     print(f"{'='*60}")
 
 
