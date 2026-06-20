@@ -76,11 +76,47 @@ jobs:
 
       - name: Start Flask app
         run: |
-          # FIX: Start Flask with explicit host/port and capture logs
+          # Debug: Check if app/main.py exists
+          ls -la app/main.py || echo "❌ app/main.py not found"
+          
+          # Debug: Check Python and Flask
+          python --version
+          pip list | grep -i flask || echo "❌ Flask not installed"
+          
+          # Start Flask with debug output
           export FLASK_APP=app/main.py
-          nohup python -m flask run --host=0.0.0.0 --port=5000 > flask.log 2>&1 &
+          export FLASK_DEBUG=0
+          python -m flask run --host=0.0.0.0 --port=5000 > flask.log 2>&1 &
           echo "FLASK_PID=$!" >> $GITHUB_ENV
-          sleep 3
+          sleep 5
+          
+          # Debug: Check if process started
+          echo "=== Process check ==="
+          ps aux | grep python | grep -v grep || echo "No python processes"
+          
+          # Debug: Check port
+          echo "=== Port check ==="
+          ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || echo "Port 5000 not listening"
+
+      - name: Wait for Flask healthy
+        run: |
+          for i in {1..30}; do
+            HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:5000/health 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Flask ready"
+              exit 0
+            fi
+            echo "⏳ Waiting for Flask... ($i/30) - HTTP: $HTTP_CODE"
+            sleep 1
+          done
+          echo "❌ Flask failed to start"
+          echo "=== Flask logs ==="
+          cat flask.log 2>/dev/null || echo "No log file"
+          echo "=== All python processes ==="
+          ps aux | grep python || true
+          echo "=== Port 5000 ==="
+          ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || lsof -i :5000 2>/dev/null || true
+          exit 1
 
       - name: Wait for Flask healthy
         run: |
