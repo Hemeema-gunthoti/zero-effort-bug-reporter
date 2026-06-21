@@ -1,3 +1,4 @@
+<!-- Add JavaScript to handle form submission and display error/validation messages -->
 {% extends "base.html" %}
 
 {% block title %}Sign In — Bug Reporter{% endblock %}
@@ -30,15 +31,15 @@
       </button>
     </div>
 
-    <div id="error-message" class="alert alert-error">
+    <div id="error-message" class="alert alert-error" style="display: none;">
       <i class="fas fa-exclamation-circle"></i> Invalid credentials. Please try again.
     </div>
 
-    <div id="validation-error" class="alert alert-error">
+    <div id="validation-error" class="alert alert-error" style="display: none;">
       <i class="fas fa-exclamation-triangle"></i> Please fill in all fields.
     </div>
 
-    <div id="success-message" class="alert alert-success">
+    <div id="success-message" class="alert alert-success" style="display: none;">
       <i class="fas fa-check-circle"></i> Login successful! Redirecting...
     </div>
 
@@ -55,3 +56,46 @@
   </div>
 </div>
 {% endblock %}
+
+<script>
+  function doLogin() {
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    if (username === '' || password === '') {
+      document.getElementById('validation-error').style.display = 'block';
+      return;
+    }
+    fetch('/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: `username=${username}&password=${password}`
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.status === 'success') {
+        document.getElementById('success-message').style.display = 'block';
+        setTimeout(() => {
+          window.location.href = data.redirect;
+        }, 1000);
+      } else {
+        document.getElementById('error-message').style.display = 'block';
+      }
+    })
+    .catch(error => console.error('Error:', error));
+  }
+
+  function togglePassword() {
+    const passwordInput = document.getElementById('password');
+    if (passwordInput.type === 'password') {
+      passwordInput.type = 'text';
+      document.getElementById('eye-icon').classList.remove('fa-eye');
+      document.getElementById('eye-icon').classList.add('fa-eye-slash');
+    } else {
+      passwordInput.type = 'password';
+      document.getElementById('eye-icon').classList.remove('fa-eye-slash');
+      document.getElementById('eye-icon').classList.add('fa-eye');
+    }
+  }
+</script>
