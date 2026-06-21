@@ -25,26 +25,20 @@ from config.settings import settings
 ARTIFACT_DIR = Path(os.path.dirname(__file__)).parent / "artifacts"
 AI_FIX_DIR = ARTIFACT_DIR / "ai_fixes"
 
-# Smaller/faster model with 500k TPD vs llama-3.3-70b's 100k TPD.
+# FIX 1: Use the 8b-instant model for fix generation — it has 500k TPD
+# vs llama-3.3-70b-versatile's 100k TPD, preventing rate-limit errors.
 FIX_MODEL = os.getenv("GROQ_FIX_MODEL", "llama-3.1-8b-instant")
 
-# Files that never contain logic bugs — exclude from LLM calls entirely.
-EXCLUDED_FROM_FIX = {
+# FIX 2: Files that are never the cause of logic/auth/JS bugs.
+# Excluding them prevents CSS (14KB alone) from consuming the token budget.
+_EXCLUDE_FROM_FIX = {
     "app/static/css/style.css",
     "app/templates/base.html",
+    "app/templates/dashboard.html",
     "app/templates/items.html",
     "app/templates/item_detail.html",
-    "app/templates/dashboard.html",
+    "app/templates/index.html",
 }
-
-# app/main.py is always included — it is the most likely file to fix.
-ALWAYS_INCLUDE = {"app/main.py"}
-
-# Max files sent to LLM per call (excluding always-include files).
-MAX_EXTRA_FILES = 2
-
-# Max characters of any single file sent to the LLM.
-MAX_FILE_CHARS = 2500
 
 
 class AIFixAgent:
@@ -55,6 +49,8 @@ class AIFixAgent:
         )
         self.confidence_threshold = 0.5
 
+    # These strings MUST be present in any proposed app/main.py.
+    # If the LLM drops any of them, the fix is rejected and the original is kept.
     MAIN_PY_REQUIRED = [
         "@app.route('/health')",
         "app.run(host=\"0.0.0.0\", port=5000",
@@ -65,6 +61,10 @@ class AIFixAgent:
         """
         Process ALL bug reports in a single LLM call so every failing test
         is addressed together and no fix overwrites another.
+
+        Previously, propose_fix() was called once per bug report — two separate
+        LLM calls each produced their own app/main.py, and the second always
+        clobbered the first in the manifest, so only one bug got fixed in the PR.
         """
         print(f"\n{'='*60}")
         print(f"🤖 AI FIX AGENT (BATCH)")
@@ -119,63 +119,53 @@ class AIFixAgent:
             print(f"\n🎫 Jira Ticket: {jira_ticket}")
 
         file_scores = self._score_files_for_fixing(all_failures)
+        high_confidence = {k: v for k, v in file_scores.items() if v['score'] >= self.confidence_threshold}
 
-        # Always include app/main.py if it exists on disk.
-        # Then fill remaining slots with the highest-scored non-test files first,
-        # then test files. Test files score high because their names appear in
-        # the error text, but the actual bugs are almost always in app code.
-        always_files = {}
-        app_files = {}
-        test_files = {}
-
-        for path, info in file_scores.items():
-            if path in ALWAYS_INCLUDE:
-                always_files[path] = info
-            elif path.startswith("tests/"):
-                test_files[path] = info
+        if not high_confidence:
+            print("⚠️ No high-confidence files found. Trying component-based fallback...")
+            component_files = {k: v for k, v in file_scores.items()
+                             if v.get('component_match') or v['score'] > 0.1}
+            if component_files:
+                print(f"✅ Found {len(component_files)} component-matched files")
+                high_confidence = component_files
             else:
-                app_files[path] = info
+                print("⚠️ Low confidence — deferring to human")
+                return {
+                    "fixed": False,
+                    "reason": "low_confidence",
+                    "jira_ticket": jira_ticket,
+                }
 
-        # Build final selection: always-include + top app files + top test files
-        # within MAX_EXTRA_FILES slots for the non-always group
-        extra_slots = MAX_EXTRA_FILES
-        selected = dict(always_files)
+        # FIX 3: Always include app/main.py (the most common file to fix), then
+        # fill remaining slots with the top app-code files (not test files) first.
+        # Test files score high because their names appear in stack traces, but
+        # the actual bugs are almost always in application code.
+        # Cap total at 3 files to keep token usage manageable.
+        MAX_FILES = 3
+        selected = {}
 
-        for path, info in app_files.items():
-            if extra_slots <= 0:
+        # Always-include: app/main.py
+        if "app/main.py" in file_scores:
+            selected["app/main.py"] = file_scores["app/main.py"]
+
+        # Fill with top-scoring non-test app files first
+        for path, info in high_confidence.items():
+            if len(selected) >= MAX_FILES:
                 break
-            if info['score'] >= self.confidence_threshold or info.get('component_match'):
+            if path not in selected and not path.startswith("tests/"):
                 selected[path] = info
-                extra_slots -= 1
 
-        # Only add test files if we still have slots AND no app file already
-        # covers that failure — test rewrites should be a last resort
-        for path, info in test_files.items():
-            if extra_slots <= 0:
+        # Then test files if slots remain
+        for path, info in high_confidence.items():
+            if len(selected) >= MAX_FILES:
                 break
-            if info['score'] >= self.confidence_threshold:
+            if path not in selected and path.startswith("tests/"):
                 selected[path] = info
-                extra_slots -= 1
 
-        if not selected:
-            print("⚠️ No files selected. Falling back to all scored files above threshold...")
-            selected = {k: v for k, v in file_scores.items()
-                        if v['score'] >= self.confidence_threshold or v.get('component_match')}
-
-        if not selected:
-            print("⚠️ Low confidence — deferring to human")
-            return {
-                "fixed": False,
-                "reason": "low_confidence",
-                "jira_ticket": jira_ticket,
-            }
-
-        print(f"\n📎 Files selected for fixing:")
+        print(f"\n📎 Files selected ({len(selected)} of {len(high_confidence)} high-confidence, capped at {MAX_FILES}):")
         for path, info in selected.items():
-            content_len = len(info.get('content', ''))
-            sent_len = min(content_len, MAX_FILE_CHARS)
-            tag = " [always]" if path in ALWAYS_INCLUDE else (" [test]" if path.startswith("tests/") else "")
-            print(f"   {path}{tag}: score={info['score']:.2f}, chars={content_len}→{sent_len} ({', '.join(info.get('reasons', []))})")
+            chars = len(info.get('content', ''))
+            print(f"   {path}: score={info['score']:.2f}, chars={chars} ({', '.join(info.get('reasons', []))})")
 
         source_files = {k: v['content'] for k, v in selected.items()}
         fixes = self._generate_fixes(all_failures, source_files, jira_ticket)
@@ -205,6 +195,7 @@ class AIFixAgent:
         return self.propose_fix_batch([bug_report_path], mode=mode)
 
     def _get_jira_ticket_from_cache_or_files(self) -> Optional[str]:
+        """Try to find jira ticket from various sources."""
         bug_reports = list(ARTIFACT_DIR.glob("bug_reports/bug_report_*.json"))
         for br in bug_reports:
             try:
@@ -241,18 +232,27 @@ class AIFixAgent:
         print(f"❌ {len(failures)} failure(s)")
 
         jira_ticket = self._get_jira_ticket_reference()
+
         file_scores = self._score_files_for_fixing(failures)
         high_confidence = {k: v for k, v in file_scores.items() if v['score'] >= self.confidence_threshold}
 
         if not high_confidence:
             print("⚠️ Low confidence — deferring to human")
-            return {"fixed": False, "reason": "low_confidence", "jira_ticket": jira_ticket}
+            return {
+                "fixed": False,
+                "reason": "low_confidence",
+                "jira_ticket": jira_ticket,
+            }
 
-        source_files = {k: v['content'] for k, v in list(high_confidence.items())[:MAX_EXTRA_FILES + 1]}
+        source_files = {k: v['content'] for k, v in high_confidence.items()}
         fixes = self._generate_fixes(failures, source_files, jira_ticket)
 
         if not fixes:
-            return {"fixed": False, "reason": "generation_failed", "jira_ticket": jira_ticket}
+            return {
+                "fixed": False,
+                "reason": "generation_failed",
+                "jira_ticket": jira_ticket,
+            }
 
         diffs = self._generate_diffs(fixes, source_files)
         self._save_fixes(fixes, diffs, mode, file_scores, jira_ticket)
@@ -280,6 +280,7 @@ class AIFixAgent:
     def _read_test_failures(self, test_output_path: str) -> List[Dict]:
         failures = []
         metadata_files = sorted(ARTIFACT_DIR.glob("failure_*.json"))
+
         for mf in metadata_files:
             with open(mf) as f:
                 meta = json.load(f)
@@ -293,6 +294,8 @@ class AIFixAgent:
     def _score_files_for_fixing(self, failures: List[Dict]) -> Dict[str, Dict]:
         files = {}
 
+        # FIX 2 applied here: removed CSS and large templates from the candidate
+        # list. They are never the cause of the login/auth/JS bugs we fix.
         source_paths = [
             "app/main.py",
             "app/routes.py",
@@ -304,16 +307,19 @@ class AIFixAgent:
             "app/static/js/login.js",
         ]
 
-        source_paths = [p for p in source_paths if p not in EXCLUDED_FROM_FIX]
-
+        # Discover test files BEFORE the outer loop so they are read and scored.
         for failure in failures:
             raw_test_file = (failure.get("test_file") or "").replace("\\", "/")
             if "tests/" in raw_test_file:
                 rel_test_path = "tests/" + raw_test_file.split("tests/")[-1]
-                if rel_test_path not in source_paths and rel_test_path not in EXCLUDED_FROM_FIX:
+                if rel_test_path not in source_paths:
                     source_paths.append(rel_test_path)
 
         for path in source_paths:
+            # Skip explicitly excluded files even if somehow added above
+            if path in _EXCLUDE_FROM_FIX:
+                continue
+
             full_path = Path(os.path.dirname(__file__)).parent / path
             if not full_path.exists():
                 continue
@@ -339,15 +345,21 @@ class AIFixAgent:
 
                 if test_file:
                     test_stem = Path(test_file).stem
-                    app_stem = test_stem.replace("test_", "")
+                    app_stem  = test_stem.replace("test_", "")
                     if test_stem in path.lower() or app_stem in path.lower():
                         score += 0.3
                         reasons.append(f"test_file: {test_stem}")
 
-                # Penalise test files slightly so app files rank higher
-                # when scores are otherwise equal — fixes belong in app code
+                # FIX 3 (scoring): Don't boost test files for appearing in error
+                # text — test filenames always appear in stack traces, which would
+                # otherwise rank them above the app files that actually need fixing.
+                if file_name and file_name in error_text and not path.startswith("tests/"):
+                    score += 0.3
+                    reasons.append(f"mentioned: {file_name}")
+
+                # Penalise test files so app files win on ties
                 if path.startswith("tests/"):
-                    score -= 0.1
+                    score -= 0.15
 
                 if error_type == "assertionerror" and any(x in path.lower() for x in ["main.py", "routes.py", "views.py", "auth.py"]):
                     score += 0.2
@@ -357,13 +369,6 @@ class AIFixAgent:
                     if any(x in path.lower() for x in ["main.py", "routes.py", "auth.py"]):
                         score += 0.25
                         reasons.append("timeout → backend")
-
-                # Do NOT boost score for test file name appearing in error text —
-                # the test file is always mentioned in stack traces, which would
-                # otherwise push test files above app files in scoring.
-                if file_name and file_name in error_text and not path.startswith("tests/"):
-                    score += 0.3
-                    reasons.append(f"mentioned: {file_name}")
 
                 if "login" in error_text and "login" in path.lower():
                     score += 0.25
@@ -391,63 +396,63 @@ class AIFixAgent:
 
         return dict(sorted(files.items(), key=lambda x: x[1]["score"], reverse=True))
 
-    def _truncate_content(self, path: str, content: str) -> str:
-        """Truncate file to MAX_FILE_CHARS, cutting at a newline boundary."""
-        if len(content) <= MAX_FILE_CHARS:
-            return content
-        truncated = content[:MAX_FILE_CHARS]
-        last_newline = truncated.rfind('\n')
-        if last_newline > MAX_FILE_CHARS * 0.8:
-            truncated = truncated[:last_newline]
-        remaining = len(content) - len(truncated)
-        return truncated + f"\n# ... [{remaining} chars truncated] ..."
-
     def _generate_fixes(self, failures: List[Dict], source_files: Dict[str, str], jira_ticket: Optional[str]) -> Dict[str, str]:
         failure_context = json.dumps([{
             "test": f["test_name"],
-            "error": (f.get("error_summary") or "")[:150],
+            "error": f["error_summary"][:300],
             "type": f.get("error_type", "Unknown"),
             "component": f.get("component", "unknown"),
         } for f in failures], indent=2)
 
-        ticket_ref = f"\nJira: {jira_ticket}" if jira_ticket else ""
+        ticket_ref = f"\nRelated Jira Ticket: {jira_ticket}" if jira_ticket else ""
 
-        prompt = f"""Fix ALL these test failures.{ticket_ref}
+        prompt = f"""You are an expert code reviewer. Fix ALL of these test failures in one pass.{ticket_ref}
 
-FAILURES ({len(failures)} total):
+FAILURES ({len(failures)} total — fix ALL of them):
 {failure_context}
 
-FILES:
+SOURCE FILES:
 """
         for path, content in source_files.items():
-            truncated = self._truncate_content(path, content)
-            prompt += f"\n--- {path} ---\n{truncated}\n"
+            prompt += f"\n--- {path} ---\n{content}\n"
 
         prompt += """
 RULES:
-1. Fix ALL failures listed. Minimal changes only.
-2. app/main.py MUST keep: @app.route('/health'), app.run(host="0.0.0.0", port=5000, debug=False), all existing routes.
-3. Output ONLY a single valid JSON object: {"file/path": "complete fixed file content", ...}
-4. No markdown fences. No explanation text before or after the JSON.
-5. The JSON must be complete and properly closed — do not truncate output mid-file.
-6. If admin login fails because test sends "password123" but USERS has "wrongpassword", fix USERS["admin"] = "password123".
-7. If /dashboard redirects instead of returning 403, change login_required to use abort(403) and add @app.errorhandler(403) returning jsonify({"error":"Unauthorized","status":403}), 403.
-8. If JS alert elements exist in DOM but are never visible, add el.style.display='block' alongside classList.add('show') in the fetch handler."""
+1. Fix ALL failures listed above — do not skip any.
+2. MINIMAL changes only — change as few lines as possible.
+3. app/main.py HARD CONSTRAINTS — preserve ALL of the following exactly, no exceptions:
+   - The @app.route('/health') route returning jsonify({'status': 'ok'}), 200
+   - app.run(host="0.0.0.0", port=5000, debug=False) — do NOT change host, port, or debug
+   - Every existing @app.route definition — do NOT remove or rename any route
+   - The USERS and ITEMS dicts (only change a value if the fix specifically requires it)
+4. Do NOT change file paths.
+5. Do NOT remove any existing @app.route definitions from any file.
+6. Return ONLY a single JSON object with file paths as keys and complete file content as values.
+7. Do NOT include markdown formatting, explanations, or multiple JSON objects.
+8. The JSON must be complete and valid — do NOT truncate output mid-file.
+9. Decide WHERE each bug is before fixing:
+   - If the test sends credentials that don't match the app's USERS dict and the test is
+     labelled as a happy/passing path, the bug is in the app's USERS dict value — fix it.
+   - If the app returns wrong status code or wrong response shape, fix the app.
+   - If the app's login_required uses redirect() but the test expects a 403 JSON response,
+     change login_required to use abort(403) and add an @app.errorhandler(403).
+   - If JS alert elements exist in the DOM but are never made visible after a fetch() call,
+     add explicit el.style.display = 'block' alongside classList.add('show').
+10. NEVER weaken or remove a test assertion. Only correct factual wrong input/data."""
 
-        estimated_tokens = len(prompt) // 4
-        print(f"📊 Estimated prompt tokens: ~{estimated_tokens} (chars: {len(prompt)})")
-
-        # Calculate max output tokens needed:
-        # Sum of all file sizes we're returning + JSON wrapper overhead
-        total_output_chars = sum(len(c) for c in source_files.values()) + 200
-        max_output_tokens = min(max(total_output_chars // 4 + 500, 1500), 4000)
-        print(f"📊 Max output tokens set to: {max_output_tokens} (file chars total: {total_output_chars})")
+        # FIX 4: Calculate max_tokens dynamically based on actual file sizes so
+        # the LLM never runs out of output budget mid-file.
+        # Formula: sum of all file chars / 4 (chars-per-token estimate) + 600
+        # overhead for JSON structure and whitespace, capped at 4000.
+        total_output_chars = sum(len(c) for c in source_files.values())
+        max_output_tokens = min(int(total_output_chars / 4) + 600, 4000)
+        print(f"📊 Prompt chars: {len(prompt)} (~{len(prompt)//4} tokens) | max_output_tokens: {max_output_tokens}")
 
         try:
             response = self.client.chat.completions.create(
                 model=FIX_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a code fixer. Output ONLY a single valid complete JSON object mapping file paths to fixed file content. Never truncate. Never add markdown."},
+                    {"role": "system", "content": "You are a precise code fixer. Output ONLY valid JSON. No markdown. No explanations. Never truncate output."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.05,
@@ -462,8 +467,8 @@ RULES:
                 return fixes
             else:
                 print(f"⚠️ Could not extract valid JSON from response")
-                print(f"Raw response preview (first 300 chars): {raw[:300]}")
-                print(f"Raw response tail  (last  200 chars): {raw[-200:]}")
+                print(f"Raw response head: {raw[:300]}")
+                print(f"Raw response tail: {raw[-200:]}")
                 return {}
 
         except Exception as e:
@@ -510,9 +515,11 @@ RULES:
         if best_fixes:
             return best_fixes
 
-        fixed_raw = re.sub(r',\s*}', '}', raw)
+        fixed_raw = raw
+        fixed_raw = re.sub(r',\s*}', '}', fixed_raw)
         fixed_raw = re.sub(r',\s*]', ']', fixed_raw)
         fixed_raw = fixed_raw.replace("'", '"')
+
         try:
             parsed = json.loads(fixed_raw)
             if isinstance(parsed, dict):
@@ -551,6 +558,7 @@ RULES:
                     for m in missing:
                         print(f"   • {m!r}")
                     print(f"   Keeping original app/main.py.")
+                    # Do not include — leave file unchanged on disk
                     continue
 
             validated[path] = content
