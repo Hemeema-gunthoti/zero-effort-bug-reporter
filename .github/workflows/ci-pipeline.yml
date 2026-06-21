@@ -1,830 +1,136 @@
-name: CI/CD — Test-First Gated Deploy with Human Approval
+name: CI Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [main, "fix/**", "feat/**"]
   pull_request:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      action:
-        description: 'Manual action'
-        required: true
-        default: 'none'
-        type: choice
-        options:
-          - none
-          - approve-ai-fix
-          - reject-ai-fix
-          - rollback-production
 
-env:
-  PYTHON_VERSION: "3.11"
-
-# FIX: Add permissions for GITHUB_TOKEN (fallback if PAT not set)
 permissions:
   contents: write
   pull-requests: write
-  issues: write
+  actions: write
 
 jobs:
-  # ═════════════════════════════════════════════════════════════════
-  # JOB 1: BUILD & TEST (Local) — THE GATEKEEPER
-  # ═════════════════════════════════════════════════════════════════
+  # ─── STEP 1: Build & Test (must pass before anything else) ───
   build-and-test:
-    name: 🔨 Build & Test
+    name: Build & Test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     outputs:
       tests_passed: ${{ steps.test_result.outputs.passed }}
-      has_failures: ${{ steps.test_result.outputs.has_failures }}
-      run_id: ${{ github.run_id }}
-
-    services:
-      redis:
-        image: redis:7-alpine
-        ports: [6379:6379]
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+      failure_summary: ${{ steps.test_result.outputs.summary }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Setup Chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-
-      - name: Setup ChromeDriver
-        uses: nanasess/setup-chromedriver@v2
-
-      - name: Prepare directories
-        run: mkdir -p artifacts/{screenshots,stacktraces,logs,bug_reports,ai_fixes}
-
-      # FIX: Removed the foreground `timeout 3 python app/main.py` throwaway run
-      # (it was leaving orphaned processes holding port 5000) and added a
-      # synchronous import check + unbuffered single real launch instead.
-      - name: Start Flask app
         run: |
-          echo "=== Python version ==="
-          python --version
+          pip install -r requirements.txt
+          pip install pytest pytest-json-report
 
-          echo "=== Check app/main.py exists ==="
-          ls -la app/main.py
-
-          echo "=== Check templates ==="
-          ls -la app/templates/ 2>/dev/null || echo "No templates dir"
-
-          echo "=== Check requirements ==="
-          pip list | grep -i flask
-
-          echo "=== Ensure port 5000 is free before starting ==="
-          fuser -k 5000/tcp 2>/dev/null || true
-          pkill -f "python.*app/main.py" 2>/dev/null || true
-          sleep 1
-
-          echo "=== Syntax check ==="
-          python -m py_compile app/main.py && echo "✅ No syntax errors" || echo "❌ Syntax error"
-
-          echo "=== Import check (synchronous, shows full traceback if it fails) ==="
-          python -c "import sys; sys.path.insert(0,'.'); sys.path.insert(0,'app'); import main" 2>&1 || echo "❌ Import of app/main.py failed — see traceback above"
-
-          echo "=== Start Flask (real launch, unbuffered output) ==="
-          python -u app/main.py > flask.log 2>&1 &
-          echo "FLASK_PID=$!" >> $GITHUB_ENV
-          sleep 5
-
-          echo "=== Check process ==="
-          ps aux | grep -E "python.*main" | grep -v grep || echo "No main.py process"
-
-          echo "=== Check logs ==="
-          cat flask.log 2>/dev/null || echo "No log file"
-
-          echo "=== Check port ==="
-          ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || echo "Port 5000 not listening"
-
-      - name: Wait for Flask healthy
-        run: |
-          for i in {1..30}; do
-            HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:5000/health 2>/dev/null || echo "000")
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "✅ Flask ready"
-              exit 0
-            fi
-            echo "⏳ Waiting... ($i/30) HTTP: $HTTP_CODE"
-            sleep 1
-          done
-          echo "❌ Flask failed"
-          echo "=== Full Flask logs ==="
-          cat flask.log 2>/dev/null || echo "No logs"
-          echo "=== All python processes ==="
-          ps aux | grep python || true
-          exit 1
-
-      - name: Run test suite
-        id: pytest
+      - name: Run tests
+        id: run_tests
         continue-on-error: true
-        env:
-          APP_URL: http://localhost:5000
-          DISPLAY: ":99"
         run: |
-          pytest tests/ -v --tb=short \
-            --json-report --json-report-file=artifacts/test_report.json \
-            2>&1 | tee artifacts/test_output.txt
+          pytest tests/ \
+            --json-report \
+            --json-report-file=test_results.json \
+            -v 2>&1 | tee test_output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
 
-      - name: Check templates exist
-        run: |
-          ls -la app/templates/ || echo "❌ templates directory missing"
-          ls -la app/templates/*.html || echo "❌ No HTML templates found"
-
-      - name: Analyze results
+      - name: Parse test results
         id: test_result
         run: |
-          if [ -f "artifacts/test_report.json" ]; then
-            FAILED=$(python -c "import json; d=json.load(open('artifacts/test_report.json')); print(d.get('summary',{}).get('failed',1))")
-            PASSED=$(python -c "import json; d=json.load(open('artifacts/test_report.json')); print(d.get('summary',{}).get('passed',0))")
-            if [ "$FAILED" -eq 0 ] && [ "$PASSED" -gt 0 ]; then
-              echo "passed=true" >> $GITHUB_OUTPUT
-              echo "has_failures=false" >> $GITHUB_OUTPUT
-              echo "✅ All $PASSED tests passed"
-            else
-              echo "passed=false" >> $GITHUB_OUTPUT
-              echo "has_failures=true" >> $GITHUB_OUTPUT
-              echo "❌ $FAILED tests failed"
-            fi
+          if python -c "
+          import json, sys
+          with open('test_results.json') as f:
+              r = json.load(f)
+          passed = r['summary'].get('passed', 0)
+          failed = r['summary'].get('failed', 0)
+          total  = r['summary'].get('total',  0)
+          summary = f'{passed}/{total} tests passed'
+          if failed > 0:
+              # Collect failed test names + short error
+              fails = []
+              for t in r.get('tests', []):
+                  if t['outcome'] == 'failed':
+                      name = t['nodeid']
+                      msg  = t.get('call', {}).get('longrepr', '')[:300]
+                      fails.append(f'{name}: {msg}')
+              print('FAILED_TESTS=' + '|||'.join(fails))
+              print('SUMMARY=' + summary)
+              sys.exit(1)
+          print('SUMMARY=' + summary)
+          "; then
+            echo "passed=true"  >> $GITHUB_OUTPUT
           else
-            if grep -q "passed" artifacts/test_output.txt && ! grep -qE "(failed|error)" artifacts/test_output.txt; then
-              echo "passed=true" >> $GITHUB_OUTPUT
-              echo "has_failures=false" >> $GITHUB_OUTPUT
-            else
-              echo "passed=false" >> $GITHUB_OUTPUT
-              echo "has_failures=true" >> $GITHUB_OUTPUT
-            fi
+            echo "passed=false" >> $GITHUB_OUTPUT
           fi
+          echo "summary=$(python -c "
+          import json
+          with open('test_results.json') as f: r=json.load(f)
+          p=r['summary'].get('passed',0); t=r['summary'].get('total',0)
+          print(f'{p}/{t} tests passed')
+          ")" >> $GITHUB_OUTPUT
 
-      - name: Upload artifacts
+      - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-artifacts-${{ github.run_id }}
-          path: artifacts/
-          retention-days: 7
+          name: test-results
+          path: |
+            test_results.json
+            test_output.txt
 
-      - name: Cleanup Flask
-        if: always()
-        run: kill $FLASK_PID 2>/dev/null || true
-
-  # ═════════════════════════════════════════════════════════════════
-  # JOB 2A: DEPLOY PIPELINE (Tests Passed)
-  # ═════════════════════════════════════════════════════════════════
-  deploy-staging:
-    name: 🚀 Deploy to Staging
+  # ─── STEP 2: Notify user via email (runs only after build-and-test) ───
+  notify-user:
+    name: Send Bug Report Email
     needs: build-and-test
-    if: needs.build-and-test.outputs.tests_passed == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      deploy_status: ${{ steps.verify.outputs.status }}
+    # Always notify — even if tests passed, so user knows status
+    if: always()
 
     steps:
-      - name: Trigger Staging Deploy
-        run: |
-          echo "🚀 Deploying to STAGING..."
-          curl -X POST "${{ secrets.RENDER_STAGING_DEPLOY_HOOK_URL }}"
-          echo "✅ Triggered"
-
-      - name: Wait for build
-        run: sleep 45
-
-      - name: Verify staging health
-        id: verify
-        run: |
-          for i in {1..30}; do
-            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "${{ secrets.RENDER_STAGING_URL }}/health" || echo "000")
-            if [ "$STATUS" = "200" ]; then
-              echo "status=success" >> $GITHUB_OUTPUT
-              echo "✅ Staging healthy"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "status=failed" >> $GITHUB_OUTPUT
-          echo "❌ Staging health check failed"
-
-  deploy-production:
-    name: 🌐 Promote to Production
-    needs: deploy-staging
-    if: needs.deploy-staging.outputs.deploy_status == 'success'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Promote to production
-        run: |
-          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
-          echo "✅ Production deploy triggered"
-
-      - name: Wait and verify production
-        run: |
-          sleep 60
-          for i in {1..30}; do
-            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "${{ secrets.RENDER_APP_URL }}/health" || echo "000")
-            if [ "$STATUS" = "200" ]; then
-              echo "✅ Production healthy"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "❌ Production health check failed" && exit 1
-
-      - name: Notify success
-        env:
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
-          TO_EMAIL: ${{ github.event.pusher.email || secrets.SMTP_USERNAME }}
-        run: |
-          python -c "
-          import smtplib
-          from email.mime.text import MIMEText
-          msg = MIMEText('✅ Successfully deployed to production!\nURL: ${{ secrets.RENDER_APP_URL }}')
-          msg['Subject'] = '✅ Deploy Success - Production Live'
-          msg['From'] = '${{ secrets.SMTP_USERNAME }}'
-          msg['To'] = '${{ secrets.SMTP_USERNAME }}'
-          with smtplib.SMTP('smtp.gmail.com', 587) as s:
-            s.starttls()
-            s.login('${{ secrets.SMTP_USERNAME }}', '${{ secrets.SMTP_PASSWORD }}')
-            s.send_message(msg)
-          print('📧 Success email sent')
-          "
-
-  # ═════════════════════════════════════════════════════════════════
-  # JOB 2B: BUG REPORT + AI FIX (Tests Failed)
-  # ═════════════════════════════════════════════════════════════════
-  bug-report-and-fix:
-    name: 🐛 Bug Report + AI Fix
-    needs: build-and-test
-    if: needs.build-and-test.outputs.tests_passed == 'false'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    outputs:
-      jira_ticket: ${{ steps.bug_report.outputs.ticket_key }}
-      jira_tickets: ${{ steps.bug_report.outputs.ticket_keys }}
-      ai_fix_created: ${{ steps.ai_fix.outputs.fix_created }}
-      pr_number: ${{ steps.ai_fix.outputs.pr_number }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Download test artifacts
         uses: actions/download-artifact@v4
         with:
-          name: test-artifacts-${{ github.run_id }}
-          path: artifacts/
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      # ── FIX: Clear stale dedup cache before running bug reporter ─
-      - name: 🧹 Clear Stale Dedup Cache
-        run: rm -f artifacts/dedup_cache.json
-
-      # ── Step 1: Run Bug Reporter (creates Jira ticket) ──────────
-      - name: Run Bug Reporter Agent
-        id: bug_report
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_MODEL: ${{ secrets.GROQ_MODEL || 'llama-3.3-70b-versatile' }}
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
-          JIRA_SEVERITY_FIELD: ${{ secrets.JIRA_SEVERITY_FIELD }}
-          SMTP_SERVER: smtp.gmail.com
-          SMTP_PORT: "587"
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
-          APP_URL: http://localhost:5000
-          GITHUB_ACTOR: ${{ github.actor }}
-          GIT_AUTHOR_EMAIL: ${{ github.event.pusher.email }}
-          ENABLE_AI_FIX: "true"
-          FIX_MODE: propose-only
-        run: |
-          python main.py
-
-          # FIX: Read ticket keys from GITHUB_ENV (written by main.py)
-          if [ -f "$GITHUB_ENV" ]; then
-            TICKET=$(grep '^JIRA_TICKET=' "$GITHUB_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
-            TICKETS=$(grep '^JIRA_TICKETS=' "$GITHUB_ENV" 2>/dev/null | cut -d'=' -f2 || echo "")
-          else
-            TICKET=""
-            TICKETS=""
-          fi
-
-          # Fallback: try to extract from bug report files if env not set
-          if [ -z "$TICKET" ]; then
-            TICKET=$(ls artifacts/bug_reports/ 2>/dev/null | head -1 | grep -oE '[A-Z]+-[0-9]+' || echo "UNKNOWN")
-          fi
-
-          echo "ticket_key=$TICKET" >> $GITHUB_OUTPUT
-          echo "ticket_keys=$TICKETS" >> $GITHUB_OUTPUT
-          echo "🎫 Jira ticket(s): $TICKETS"
-          echo "🎫 Primary ticket: $TICKET"
-
-      # ── FIX: Upload bug reports before AI fix (preserved after cleanup) ─
-      - name: Upload Bug Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bug-reports-${{ github.run_id }}
-          path: |
-            artifacts/bug_reports/
-            artifacts/dedup_cache.json
-          retention-days: 7
-
-      # ── Step 2: Run AI Fix Agent (separate step, reads from bug_reports) ─
-      - name: Run AI Fix Agent
-        id: ai_fix
-        env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_MODEL: ${{ secrets.GROQ_MODEL || 'llama-3.3-70b-versatile' }}
-          FIX_MODE: propose-only
-        run: |
-          python -c "
-          import sys, os, glob
-          sys.path.insert(0, '.')
-          from agent.ai_fix_agent import AIFixAgent
-
-          agent = AIFixAgent()
-          bug_report_files = sorted(glob.glob('artifacts/bug_reports/bug_report_*.json'))
-          print(f'Found {len(bug_report_files)} bug reports — processing as single batch')
-
-          fix_applied = False
-          if bug_report_files:
-              try:
-                  # FIX: Single batch call so ALL bugs are fixed in one LLM pass.
-                  # Previously called propose_fix() once per file — each call
-                  # produced its own app/main.py fix and the second overwrote
-                  # the first in the manifest, leaving only one bug addressed.
-                  result = agent.propose_fix_batch(bug_report_files, mode='propose-only')
-                  print(f'Batch result: bugs_addressed={result.get(\"bugs_addressed\", \"?\")}, fixed={result.get(\"fixed\")}')
-                  if result.get('fixed'):
-                      fix_applied = True
-              except Exception as e:
-                  print(f'Error in batch fix: {e}')
-                  import traceback
-                  traceback.print_exc()
-
-          if fix_applied:
-              os.makedirs('artifacts/ai_fixes', exist_ok=True)
-              with open('artifacts/ai_fixes/fix_applied.txt', 'w') as f:
-                  f.write('fix_proposed')
-              print('Fix marker created')
-          "
-
-          if [ -f "artifacts/ai_fixes/fix_applied.txt" ]; then
-            echo "fix_created=true" >> $GITHUB_OUTPUT
-          else
-            echo "fix_created=false" >> $GITHUB_OUTPUT
-          fi
-
-      # ── FIX: Step 3: Create PR with AI Fix (uses PAT_TOKEN) ─────
-      - name: Create AI Fix PR
-        if: steps.ai_fix.outputs.fix_created == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          # FIX: Configure git with PAT authentication
-          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
-
-          BRANCH="ai-fix-${{ github.run_id }}"
-          git config user.name "AI Fix Bot"
-          git config user.email "ai-fix@bot.com"
-          git checkout -b "$BRANCH"
-
-          # FIX: Apply fixes via the manifest (path -> fix filename), which
-          # handles any path safely — including tests/test_login.py, where the
-          # old sed-based "_" -> "/" reversal would corrupt the filename
-          # (it would turn "test_login.py" into "test/login.py").
-          TOUCHED_TESTS="false"
-          if [ -f artifacts/ai_fixes/fix_manifest.json ]; then
-            python3 -c "
-          import json, shutil, os
-
-          manifest = json.load(open('artifacts/ai_fixes/fix_manifest.json'))
-          touched_tests = False
-          for orig_path, fix_filename in manifest.items():
-              fix_path = os.path.join('artifacts/ai_fixes', fix_filename)
-              if not os.path.exists(fix_path):
-                  continue
-              if not (orig_path.startswith('app/') or orig_path.startswith('tests/')):
-                  print(f'Skipping unexpected path: {orig_path}')
-                  continue
-              os.makedirs(os.path.dirname(orig_path) or '.', exist_ok=True)
-              shutil.copy(fix_path, orig_path)
-              print(f'Applied fix to {orig_path}')
-              if orig_path.startswith('tests/'):
-                  touched_tests = True
-
-          open('touched_tests.flag', 'w').write('true' if touched_tests else 'false')
-          "
-            git add -A -- app tests 2>/dev/null || true
-            [ -f touched_tests.flag ] && TOUCHED_TESTS=$(cat touched_tests.flag)
-            rm -f touched_tests.flag
-          fi
-          echo "TOUCHED_TESTS=$TOUCHED_TESTS" >> $GITHUB_ENV
-
-          # FIX: Verify only source/test files are staged
-          echo "=== Staged files ==="
-          git diff --cached --name-only
-
-          git commit -m "🤖 AI Fix Proposal [RUN-${{ github.run_id }}]
-
-          Fixes for failing tests. Awaiting human approval.
-
-          Jira Ticket: ${{ steps.bug_report.outputs.ticket_key }}
-
-          To approve: Run workflow_dispatch with 'approve-ai-fix'"
-
-          # FIX: Push with explicit token authentication
-          git push origin "$BRANCH" || {
-            echo "❌ First push failed, retrying..."
-            sleep 2
-            git push origin "$BRANCH"
-          }
-
-          # FIX: Add a review warning if the agent touched a test file, so a
-          # human specifically checks it wasn't weakened to force a pass.
-          REVIEW_NOTE=""
-          if [ "$TOUCHED_TESTS" = "true" ]; then
-            REVIEW_NOTE="
-          ### ⚠️ This fix modifies test file(s)
-          The agent determined the bug was in test data, not application code. Review the test diff carefully — confirm it only corrects a factual input value, and doesn't loosen or remove any assertion."
-          fi
-
-          # FIX: gh CLI automatically uses GH_TOKEN env var - no explicit login needed
-          PR_URL=$(gh pr create \
-            --repo ${{ github.repository }} \
-            --title "🤖 AI Fix: Run #${{ github.run_id }} | Ticket: ${{ steps.bug_report.outputs.ticket_key }}" \
-            --body "## AI-Generated Fix Proposal
-
-          | Field | Value |
-          |-------|-------|
-          | **Jira Ticket** | ${{ steps.bug_report.outputs.ticket_key }} |
-          | **Run** | #${{ github.run_id }} |
-          | **Status** | ⏳ Awaiting Approval |
-
-          ### What Changed
-          AI analyzed test failures and proposed code fixes.
-          $REVIEW_NOTE
-
-          ### How to Review
-          1. Check **Files changed** tab
-          2. Approve: Actions → Run workflow → **approve-ai-fix**
-          3. Reject: Actions → Run workflow → **reject-ai-fix**
-
-          ### On Approval
-          - Auto-tests the fix
-          - Merges if tests pass
-          - Updates Jira: 'Resolved by AI'
-          - Deploys to production" \
-            --base main \
-            --head "$BRANCH")
-
-          PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
-          echo "pr_number=$PR_NUM" >> $GITHUB_OUTPUT
-          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
-
-      # ── Step 4: Email notification ──────────────────────────────
-      - name: Send email notification
-        if: steps.ai_fix.outputs.fix_created == 'true'
-        env:
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
-          # FIX: Use SMTP_USERNAME as fallback instead of noreply GitHub email
-          TO_EMAIL: ${{ secrets.SMTP_USERNAME }}
-          JIRA_URL: ${{ secrets.JIRA_BASE_URL }}/browse/${{ steps.bug_report.outputs.ticket_key }}
-          PR_URL: ${{ steps.ai_fix.outputs.pr_url || 'N/A' }}
-          TICKET: ${{ steps.bug_report.outputs.ticket_key }}
-        run: |
-          python -c "
-          import smtplib, os
-          from email.mime.text import MIMEText
-          from email.mime.multipart import MIMEMultipart
-
-          msg = MIMEMultipart('alternative')
-          msg['Subject'] = f'🐛 Bug Reported + AI Fix Proposed - {os.getenv(\"TICKET\")}'
-          msg['From'] = os.getenv('FROM_EMAIL')
-          msg['To'] = os.getenv('TO_EMAIL')
-
-          html = f'''
-          <html>
-          <body style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #333;\">
-            <h2 style=\"color: #dc2626;\">🐛 Tests Failed — Bug Reported</h2>
-            <div style=\"background: #fee2e2; padding: 15px; border-radius: 8px; margin: 20px 0;\">
-              <p><strong>Jira Ticket:</strong> <a href=\"{os.getenv(\"JIRA_URL\")}\">{os.getenv(\"TICKET\")}</a></p>
-            </div>
-            <h3 style=\"color: #4f46e5;\">🤖 AI Fix Proposal</h3>
-            <p>An AI-generated fix has been proposed for review.</p>
-            <p><strong>PR:</strong> {os.getenv(\"PR_URL\")}</p>
-            <h3>Next Steps:</h3>
-            <ol>
-              <li>Review the PR code changes</li>
-              <li>Approve or reject via GitHub Actions</li>
-              <li>If approved: auto-tested, merged, deployed</li>
-              <li>If rejected: manual fix required</li>
-            </ol>
-          </body>
-          </html>
-          '''
-          msg.attach(MIMEText(html, 'html'))
-          with smtplib.SMTP('smtp.gmail.com', 587) as s:
-            s.starttls()
-            s.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
-            s.send_message(msg)
-          print('📧 Notification sent to: ' + os.getenv('TO_EMAIL'))
-          "
-
-      # ── FIX: Update Jira only if we have a valid ticket key ─────
-      # FIX: Use v2 plain text format (not v3 ADF format) to avoid INVALID_INPUT
-      - name: Update Jira for manual fix
-        if: steps.ai_fix.outputs.fix_created == 'false' && steps.bug_report.outputs.ticket_key != '' && steps.bug_report.outputs.ticket_key != 'UNKNOWN'
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          TICKET: ${{ steps.bug_report.outputs.ticket_key }}
-        run: |
-          echo "Updating Jira ticket: $TICKET"
-          # FIX: Use v2 plain text format
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"body":"🤖 AI Fix Agent could not generate an automatic fix. Manual developer intervention required."}' \
-            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
-          echo "📝 Jira updated: Manual fix needed"
-
-      # ── FIX: Warning if no valid ticket was created ─────────────
-      - name: ⚠️ No Valid Ticket Warning
-        if: steps.bug_report.outputs.ticket_key == '' || steps.bug_report.outputs.ticket_key == 'UNKNOWN'
-        run: |
-          echo "⚠️ No valid JIRA ticket was created or exported."
-          echo "This may mean:"
-          echo "  - All tests passed (no failures)"
-          echo "  - Ticket creation failed"
-          echo "  - Bug reporter did not export ticket key"
-          exit 0
-
-  # ═════════════════════════════════════════════════════════════════
-  # JOB 3: APPROVE AI FIX (Manual trigger)
-  # ═════════════════════════════════════════════════════════════════
-  approve-ai-fix:
-    name: ✅ Approve & Merge AI Fix
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'approve-ai-fix'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Find AI fix PR
-        id: find_pr
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          PR_NUM=$(gh pr list --repo ${{ github.repository }} --search "AI Fix" --state open --json number --jq '.[0].number')
-          echo "pr=$PR_NUM" >> $GITHUB_OUTPUT
-
-      - name: Checkout PR
-        uses: actions/checkout@v4
-        with:
-          ref: refs/pull/${{ steps.find_pr.outputs.pr }}/head
-          token: ${{ secrets.PAT_TOKEN }}
-
-      # FIX: Pin the same Python version used in build-and-test.
-      # This job was previously missing setup-python entirely, leaving it
-      # to whatever default Python the runner image shipped with.
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      # FIX: Synchronous diagnostic so any import-time crash prints a
-      # full traceback to the visible log instead of vanishing.
-      - name: Diagnose environment before starting Flask
-        run: |
-          echo "=== pwd / files ==="
-          pwd
-          ls -la
-          ls -la app/
-          echo "=== templates ==="
-          ls -la app/templates/ 2>/dev/null || echo "❌ No templates dir"
-          echo "=== flask install ==="
-          pip show flask || echo "❌ Flask not installed"
-          echo "=== import test (synchronous) ==="
-          python -c "import sys; sys.path.insert(0,'.'); import app.main" 2>&1 || echo "❌ Import of app.main failed — see traceback above"
-
-      # FIX: Use the SAME startup method as build-and-test
-      # (python app/main.py), not `flask run`, for consistency.
-      # -u disables stdout/stderr buffering so crashes are captured
-      # in flask.log even if the process dies almost immediately.
-      - name: Start Flask app
-        run: |
-          echo "=== Python version ==="
-          python --version
-
-          echo "=== Check app/main.py exists ==="
-          ls -la app/main.py
-
-          echo "=== Check templates ==="
-          ls -la app/templates/ 2>/dev/null || echo "No templates dir"
-
-          echo "=== Check requirements ==="
-          pip list | grep -i flask
-
-          echo "=== Ensure port 5000 is free before starting ==="
-          fuser -k 5000/tcp 2>/dev/null || true
-          pkill -f "python.*app/main.py" 2>/dev/null || true
-          sleep 1
-
-          echo "=== Start Flask (single real launch, no foreground throwaway run) ==="
-          python -u app/main.py > flask.log 2>&1 &
-          echo $! > flask.pid
-          echo "FLASK_PID=$(cat flask.pid)" >> $GITHUB_ENV
-          sleep 5
-
-          echo "=== Check process ==="
-          ps aux | grep -E "python.*main" | grep -v grep || echo "No main.py process"
-
-          echo "=== Check logs ==="
-          cat flask.log 2>/dev/null || echo "No log file"
-
-          echo "=== Check port ==="
-          ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || echo "Port 5000 not listening"
-
-          echo "=== Confirm this is OUR process (sanity check) ==="
-          curl -s http://localhost:5000/health || echo "Not reachable yet"
-
-      - name: Wait for Flask healthy
-        run: |
-          for i in {1..30}; do
-            HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:5000/health 2>/dev/null || echo "000")
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "✅ Flask ready"
-              exit 0
-            fi
-            if ! kill -0 "$(cat flask.pid)" 2>/dev/null; then
-              echo "❌ Flask process died while waiting for health check"
-              cat flask.log
-              exit 1
-            fi
-            echo "⏳ Waiting for Flask... ($i/30) - HTTP: $HTTP_CODE"
-            sleep 1
-          done
-          echo "❌ Flask failed to become healthy in time"
-          cat flask.log 2>/dev/null || true
-          exit 1
-
-      # FIX: Now run tests with Flask running
-      - name: Test the AI fix
-        id: test_fix
+          name: test-results
         continue-on-error: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install notifier deps
+        run: pip install python-dotenv requests
+
+      - name: Send notification email
         env:
-          APP_URL: http://localhost:5000
+          SMTP_HOST:        ${{ secrets.SMTP_HOST }}
+          SMTP_PORT:        ${{ secrets.SMTP_PORT }}
+          SMTP_USER:        ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD:    ${{ secrets.SMTP_PASSWORD }}
+          NOTIFY_EMAIL:     ${{ secrets.NOTIFY_EMAIL }}
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          REPO:             ${{ github.repository }}
+          BRANCH:           ${{ github.ref_name }}
+          COMMIT_SHA:       ${{ github.sha }}
+          RUN_ID:           ${{ github.run_id }}
+          TESTS_PASSED:     ${{ needs.build-and-test.outputs.tests_passed }}
+          FAILURE_SUMMARY:  ${{ needs.build-and-test.outputs.failure_summary }}
+          # Webhook URL hosted on your server / Render that handles button clicks
+          WEBHOOK_BASE_URL: ${{ secrets.WEBHOOK_BASE_URL }}
         run: |
-          pytest tests/ -v --tb=short 2>&1 | tee ai_fix_test.txt
-          if grep -q "passed" ai_fix_test.txt && ! grep -qE "(failed|error)" ai_fix_test.txt; then
-            echo "passed=true" >> $GITHUB_OUTPUT
-          else
-            echo "passed=false" >> $GITHUB_OUTPUT
-          fi
+          python notifications/email_notifier.py
 
-      # FIX: Always show Flask log on test failure for visibility
-      - name: Dump Flask log if tests failed
-        if: steps.test_fix.outputs.passed == 'false'
-        run: cat flask.log 2>/dev/null || echo "No Flask log found"
-
-      # FIX: Cleanup Flask after tests
-      - name: Cleanup Flask
-        if: always()
-        run: kill "$(cat flask.pid 2>/dev/null)" 2>/dev/null || true
-
-      - name: Merge if tests pass
-        if: steps.test_fix.outputs.passed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-        run: |
-          PR_BODY=$(gh pr view ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --json body --jq '.body')
-          TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-
-          gh pr merge ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --squash --delete-branch
-          echo "✅ AI fix merged"
-
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"body":"✅ RESOLVED by AI Fix Agent. Fix approved by human reviewer and auto-merged. Deploying to production."}' \
-            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
-
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"transition":{"id":"31"}}' \
-            "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/transitions" || true
-
-          echo "🎫 Jira ticket $TICKET marked as resolved"
-
-      - name: Close PR if tests fail
-        if: steps.test_fix.outputs.passed == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-        run: |
-          PR_NUM=${{ steps.find_pr.outputs.pr }}
-          gh pr comment $PR_NUM --repo ${{ github.repository }} --body "❌ AI fix failed auto-tests. Needs revision."
-
-          PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
-          TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"body":"❌ AI fix was approved but failed auto-tests. Fix needs revision."}' \
-            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
-
-  # ═════════════════════════════════════════════════════════════════
-  # JOB 4: REJECT AI FIX (Manual trigger)
-  # ═════════════════════════════════════════════════════════════════
-  reject-ai-fix:
-    name: ❌ Reject AI Fix
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'reject-ai-fix'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Close AI fix PR
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-        run: |
-          # FIX: gh CLI automatically uses GH_TOKEN - no explicit login needed
-          PR_NUM=$(gh pr list --repo ${{ github.repository }} --search "AI Fix" --state open --json number --jq '.[0].number')
-          PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
-          TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-
-          gh pr close $PR_NUM --repo ${{ github.repository }} --comment "❌ Rejected by human reviewer. Manual fix required."
-
-          # FIX: Use v2 plain text format
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"body":"🤖 AI fix was rejected by human reviewer. Manual developer fix required."}' \
-            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
-
-          echo "✅ AI fix rejected, Jira updated"
-
-  # ═════════════════════════════════════════════════════════════════
-  # JOB 5: EMERGENCY ROLLBACK
-  # ═════════════════════════════════════════════════════════════════
-  rollback-production:
-    name: 🚨 Emergency Rollback
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'rollback-production'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Rollback production
-        run: |
-          echo "🚨 Rolling back to previous stable version..."
-          echo "Rollback completed"
+  # ─── STEP 3: AI Fix (triggered ONLY after build-and-test fails + user picks AI Fix) ───
+  # This job does NOT run automatically — it is dispatched by the webhook handler
+  # See .github/workflows/ai-fix.yml for the dispatch-triggered workflow

@@ -1,518 +1,418 @@
 """
-notifications/email_notifier.py
---------------------------------
-Sends email notifications when:
-  - A new bug ticket is created
-  - A duplicate is found and priority is escalated
-
-Uses Python's built-in smtplib — no extra dependencies needed.
+email_notifier.py
+Sends a rich HTML email with full bug details and two CTA buttons:
+  - [Fix with AI]  → triggers the ai-fix workflow via webhook
+  - [Fix Manually] → links to the GitHub Actions run
 """
 
 import os
+import json
 import smtplib
+import sys
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
-from email.mime.text      import MIMEText
-from datetime             import datetime
-from dotenv               import load_dotenv
-
-load_dotenv()
-
-SMTP_SERVER   = os.getenv("SMTP_SERVER",   "smtp.gmail.com")
-SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-FROM_EMAIL    = os.getenv("FROM_EMAIL",    "")
+from email.mime.text import MIMEText
 
 
-def notify_email(bug_report: dict, jira_result: dict) -> dict:
-    """
-    Main entry point called from main.py.
-    Routes to the correct email template based on ticket status.
-    """
-    if not _is_configured():
-        print(f"📧 Email skipped — SMTP not configured in .env")
-        return {"status": "skipped", "message": "SMTP not configured"}
+# ──────────────────────────────────────────────
+# Config from environment
+# ──────────────────────────────────────────────
+SMTP_HOST       = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT       = int(os.environ.get("SMTP_PORT", 587))
+SMTP_USER       = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD   = os.environ.get("SMTP_PASSWORD", "")
+NOTIFY_EMAIL    = os.environ.get("NOTIFY_EMAIL", "")
+REPO            = os.environ.get("REPO", "")
+BRANCH          = os.environ.get("BRANCH", "main")
+COMMIT_SHA      = os.environ.get("COMMIT_SHA", "")
+RUN_ID          = os.environ.get("RUN_ID", "")
+TESTS_PASSED    = os.environ.get("TESTS_PASSED", "false").lower() == "true"
+FAILURE_SUMMARY = os.environ.get("FAILURE_SUMMARY", "")
+WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "").rstrip("/")
+EMAIL_MODE      = os.environ.get("EMAIL_MODE", "bug_report")  # bug_report | ai_fix_success | ai_fix_failed
 
-    status     = jira_result.get("status", "unknown")
-    ticket_key = jira_result.get("ticket_key", "N/A")
-    ticket_url = jira_result.get("ticket_url", "")
-    to_email   = SMTP_USERNAME
 
+def load_failed_tests() -> list[dict]:
+    """Try to load failed test details from test_results.json"""
     try:
-        if status == "success":
-            return _send_new_ticket_email(bug_report, jira_result, to_email)
-        elif status == "duplicate":
-            return _send_escalation_email(bug_report, jira_result, to_email)
-        else:
-            print(f"📧 Email skipped — unhandled status: {status}")
-            return {"status": "skipped", "message": f"Unhandled status: {status}"}
+        with open("test_results.json") as f:
+            data = json.load(f)
+        failed = []
+        for t in data.get("tests", []):
+            if t.get("outcome") == "failed":
+                failed.append({
+                    "name":  t["nodeid"],
+                    "error": t.get("call", {}).get("longrepr", "No details")[:600],
+                })
+        return failed
+    except Exception:
+        return []
 
-    except Exception as e:
-        print(f"📧 Email failed: {e}")
-        return {"status": "error", "message": str(e)}
+
+def _ai_fix_url() -> str:
+    """Webhook URL that triggers the AI fix workflow."""
+    return (
+        f"{WEBHOOK_BASE_URL}/trigger-ai-fix"
+        f"?repo={REPO}"
+        f"&branch={BRANCH}"
+        f"&commit_sha={COMMIT_SHA}"
+        f"&run_id={RUN_ID}"
+    )
 
 
-def _send_new_ticket_email(
-    bug_report:  dict,
-    jira_result: dict,
-    to_email:    str,
-) -> dict:
-    ticket_key  = jira_result.get("ticket_key", "N/A")
-    ticket_url  = jira_result.get("ticket_url", "")
-    severity    = bug_report.get("severity", "Unknown")
-    priority    = bug_report.get("priority", "Unknown")
-    title       = bug_report.get("title", "Unknown")
-    test_name   = bug_report["metadata"].get("test_name", "Unknown")
-    component   = bug_report["metadata"].get("affected_component", "Unknown")
-    timestamp   = bug_report["metadata"].get("timestamp", "Unknown")
+def _manual_url() -> str:
+    """Direct link to the GitHub Actions run."""
+    return f"https://github.com/{REPO}/actions/runs/{RUN_ID}"
 
-    subject = f"🐛 [{severity}] New Bug: {ticket_key} — {title[:60]}"
 
-    html = f"""
+def _failed_tests_html(failed_tests: list[dict]) -> str:
+    if not failed_tests:
+        return "<p style='color:#6b7280;'>No detailed failure info available.</p>"
+
+    rows = ""
+    for i, t in enumerate(failed_tests, 1):
+        error_escaped = (
+            t["error"]
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        rows += f"""
+        <div style="margin-bottom:16px; padding:12px 16px;
+                    background:#1e1e2e; border-radius:8px;
+                    border-left:4px solid #ef4444;">
+          <p style="margin:0 0 6px 0; font-size:13px; font-weight:600;
+                    color:#f87171; font-family:monospace;">
+            #{i}  {t['name']}
+          </p>
+          <pre style="margin:0; font-size:11px; color:#d1d5db;
+                      white-space:pre-wrap; word-break:break-all;
+                      font-family:monospace;">{error_escaped}</pre>
+        </div>
+        """
+    return rows
+
+
+def _build_bug_report_email(failed_tests: list[dict]) -> str:
+    short_sha = COMMIT_SHA[:8] if COMMIT_SHA else "unknown"
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    test_count = len(failed_tests)
+    status_badge = (
+        '<span style="background:#ef4444;color:#fff;padding:3px 10px;'
+        'border-radius:12px;font-size:12px;font-weight:700;">FAILED</span>'
+        if not TESTS_PASSED else
+        '<span style="background:#22c55e;color:#fff;padding:3px 10px;'
+        'border-radius:12px;font-size:12px;font-weight:700;">PASSED</span>'
+    )
+
+    failed_section = ""
+    if not TESTS_PASSED and failed_tests:
+        failed_section = f"""
+        <div style="margin:24px 0;">
+          <h3 style="margin:0 0 12px 0; color:#f87171;
+                     font-size:15px; font-weight:700;">
+            ❌ Failed Tests ({test_count})
+          </h3>
+          {_failed_tests_html(failed_tests)}
+        </div>
+        """
+
+    cta_section = ""
+    if not TESTS_PASSED:
+        cta_section = f"""
+        <div style="margin:32px 0; text-align:center;">
+          <p style="color:#9ca3af; font-size:14px; margin-bottom:20px;">
+            How would you like to resolve these failures?
+          </p>
+
+          <!-- AI Fix Button -->
+          <a href="{_ai_fix_url()}"
+             style="display:inline-block; margin:8px 12px;
+                    padding:14px 32px; background:#6366f1;
+                    color:#ffffff; text-decoration:none;
+                    border-radius:8px; font-size:15px;
+                    font-weight:700; letter-spacing:0.3px;
+                    box-shadow:0 4px 14px rgba(99,102,241,0.4);">
+            🤖 Fix with AI
+          </a>
+
+          <!-- Manual Fix Button -->
+          <a href="{_manual_url()}"
+             style="display:inline-block; margin:8px 12px;
+                    padding:14px 32px; background:#374151;
+                    color:#ffffff; text-decoration:none;
+                    border-radius:8px; font-size:15px;
+                    font-weight:700; letter-spacing:0.3px;">
+            🔧 Fix Manually
+          </a>
+
+          <p style="margin-top:20px; font-size:12px; color:#6b7280;">
+            <strong style="color:#6366f1;">Fix with AI</strong>
+            will trigger the AI agent to analyze the failures, apply patches,
+            re-run all tests, and auto-merge only if every test passes.<br><br>
+            <strong>Fix Manually</strong>
+            opens the GitHub Actions run so you can investigate and push your own fix.
+          </p>
+        </div>
+        """
+    else:
+        cta_section = f"""
+        <div style="margin:24px 0; text-align:center;">
+          <a href="{_manual_url()}"
+             style="display:inline-block; padding:12px 28px;
+                    background:#22c55e; color:#fff;
+                    text-decoration:none; border-radius:8px;
+                    font-size:14px; font-weight:700;">
+            ✅ View Successful Run
+          </a>
+        </div>
+        """
+
+    return f"""
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <style>
-    body       {{ font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }}
-    .container {{ max-width: 600px; margin: auto; background: #fff;
-                  border-radius: 8px; overflow: hidden;
-                  box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-    .header    {{ background: {'#dc2626' if severity == 'Critical' else
-                               '#d97706' if severity == 'High' else
-                               '#2563eb'};
-                  color: #fff; padding: 24px 32px; }}
-    .header h1 {{ margin: 0; font-size: 20px; }}
-    .header p  {{ margin: 6px 0 0; opacity: 0.9; font-size: 14px; }}
-    .body      {{ padding: 24px 32px; }}
-    .field     {{ margin-bottom: 14px; }}
-    .label     {{ font-size: 12px; color: #666; text-transform: uppercase;
-                  letter-spacing: 0.5px; margin-bottom: 4px; }}
-    .value     {{ font-size: 15px; color: #111; font-weight: 500; }}
-    .badge     {{ display: inline-block; padding: 3px 10px; border-radius: 12px;
-                  font-size: 12px; font-weight: 600; }}
-    .critical  {{ background: #fee2e2; color: #dc2626; }}
-    .high      {{ background: #fef3c7; color: #d97706; }}
-    .medium    {{ background: #dbeafe; color: #2563eb; }}
-    .low       {{ background: #d1fae5; color: #059669; }}
-    .btn       {{ display: inline-block; margin-top: 20px; padding: 12px 28px;
-                  background: #4f46e5; color: #fff; text-decoration: none;
-                  border-radius: 6px; font-weight: 600; font-size: 15px; }}
-    .footer    {{ padding: 16px 32px; background: #f9fafb; border-top: 1px solid #e5e7eb;
-                  font-size: 12px; color: #9ca3af; text-align: center; }}
-    table      {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
-    th, td     {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid #e5e7eb;
-                  font-size: 14px; }}
-    th         {{ background: #f9fafb; color: #6b7280; font-weight: 600;
-                  text-transform: uppercase; font-size: 11px; }}
-  </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zero-Effort Bug Reporter</title>
 </head>
-<body>
-<div class="container">
-  <div class="header">
-    <h1>🐛 New Bug Detected</h1>
-    <p>Zero-Effort Bug Reporter — Automated Detection</p>
-  </div>
-  <div class="body">
-    <div class="field">
-      <div class="label">Ticket</div>
-      <div class="value">{ticket_key}</div>
-    </div>
-    <div class="field">
-      <div class="label">Title</div>
-      <div class="value">{title}</div>
-    </div>
-    <table>
-      <tr>
-        <th>Field</th>
-        <th>Value</th>
-      </tr>
-      <tr>
-        <td>Severity</td>
-        <td><span class="badge {severity.lower()}">{severity}</span></td>
-      </tr>
-      <tr>
-        <td>Priority</td>
-        <td>{priority}</td>
-      </tr>
-      <tr>
-        <td>Component</td>
-        <td>{component}</td>
-      </tr>
-      <tr>
-        <td>Failed Test</td>
-        <td><code style="font-size:12px">{test_name}</code></td>
-      </tr>
-      <tr>
-        <td>Detected At</td>
-        <td>{timestamp}</td>
-      </tr>
-    </table>
-    <a href="{ticket_url}" class="btn">View Jira Ticket →</a>
-  </div>
-  <div class="footer">
-    Generated automatically by Zero-Effort Bug Reporter •
-    {datetime.now().strftime('%Y-%m-%d %H:%M')}
-  </div>
-</div>
+<body style="margin:0; padding:0; background:#0f1117; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+
+  <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+         style="background:#0f1117; min-height:100vh; padding:40px 16px;">
+    <tr>
+      <td align="center">
+
+        <!-- Card -->
+        <table width="620" cellpadding="0" cellspacing="0" role="presentation"
+               style="background:#1a1d27; border-radius:16px;
+                      border:1px solid #2d3148; overflow:hidden;
+                      box-shadow:0 8px 32px rgba(0,0,0,0.4);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#1e1b4b 0%,#312e81 100%);
+                       padding:28px 32px; border-bottom:1px solid #2d3148;">
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+                <tr>
+                  <td>
+                    <p style="margin:0; font-size:12px; color:#818cf8;
+                               text-transform:uppercase; letter-spacing:1px;
+                               font-weight:600;">Zero-Effort Bug Reporter</p>
+                    <h1 style="margin:6px 0 0 0; font-size:22px;
+                                color:#e0e7ff; font-weight:800;">
+                      {'⚠️ Build Failure Detected' if not TESTS_PASSED else '✅ Build Passed'}
+                    </h1>
+                  </td>
+                  <td align="right" style="vertical-align:top; padding-top:4px;">
+                    {status_badge}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Meta info -->
+          <tr>
+            <td style="padding:24px 32px 0 32px;">
+              <table width="100%" cellpadding="0" cellspacing="0" role="presentation"
+                     style="background:#111827; border-radius:10px;
+                            border:1px solid #1f2937; overflow:hidden;">
+                <tr>
+                  <td style="padding:16px 20px;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                      {"".join(f'''
+                      <tr>
+                        <td style="padding:5px 0; color:#6b7280;
+                                   font-size:13px; width:130px;">{k}</td>
+                        <td style="padding:5px 0; color:#e5e7eb;
+                                   font-size:13px; font-family:monospace;">{v}</td>
+                      </tr>
+                      ''' for k,v in [
+                          ("Repository",   REPO or "—"),
+                          ("Branch",       BRANCH or "—"),
+                          ("Commit",       f"{short_sha}"),
+                          ("Run ID",       f"#{RUN_ID}"),
+                          ("Timestamp",    timestamp),
+                          ("Tests Failed", str(test_count) if not TESTS_PASSED else "0"),
+                      ])}
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:24px 32px;">
+              {failed_section}
+              {cta_section}
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:16px 32px 28px 32px; border-top:1px solid #1f2937;">
+              <p style="margin:0; font-size:11px; color:#4b5563; text-align:center;">
+                This is an automated notification from Zero-Effort Bug Reporter.<br>
+                <a href="https://github.com/{REPO}" style="color:#6366f1; text-decoration:none;">
+                  View Repository
+                </a>
+                &nbsp;·&nbsp;
+                <a href="{_manual_url()}" style="color:#6366f1; text-decoration:none;">
+                  View Run
+                </a>
+              </p>
+            </td>
+          </tr>
+
+        </table>
+        <!-- /Card -->
+
+      </td>
+    </tr>
+  </table>
+
 </body>
 </html>
 """
 
-    return _send(to_email, subject, html, ticket_key)
 
-
-def _send_escalation_email(
-    bug_report:  dict,
-    jira_result: dict,
-    to_email:    str,
-) -> dict:
-    ticket_key    = jira_result.get("ticket_key", "N/A")
-    ticket_url    = jira_result.get("ticket_url", "")
-    old_priority  = jira_result.get("old_priority", "Unknown")
-    new_priority  = jira_result.get("new_priority", "Unknown")
-    severity      = bug_report.get("severity", "Unknown")
-    title         = bug_report.get("title", "Unknown")
-    test_name     = bug_report["metadata"].get("test_name", "Unknown")
-    timestamp     = bug_report["metadata"].get("timestamp", "Unknown")
-
-    subject = f"⬆️ Priority Escalated: {ticket_key} — {old_priority} → {new_priority}"
-
-    html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-  <style>
-    body       {{ font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }}
-    .container {{ max-width: 600px; margin: auto; background: #fff;
-                  border-radius: 8px; overflow: hidden;
-                  box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-    .header    {{ background: #7c3aed; color: #fff; padding: 24px 32px; }}
-    .header h1 {{ margin: 0; font-size: 20px; }}
-    .header p  {{ margin: 6px 0 0; opacity: 0.9; font-size: 14px; }}
-    .body      {{ padding: 24px 32px; }}
-    .escalation-box {{
-      background: #fef3c7; border: 2px solid #f59e0b;
-      border-radius: 8px; padding: 16px 20px; margin: 16px 0;
-      text-align: center;
-    }}
-    .escalation-box .arrow {{
-      font-size: 28px; font-weight: 700; color: #d97706;
-    }}
-    .escalation-box .label {{
-      font-size: 12px; color: #92400e; text-transform: uppercase; margin-bottom: 8px;
-    }}
-    table      {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
-    th, td     {{ text-align: left; padding: 10px 12px; border-bottom: 1px solid #e5e7eb;
-                  font-size: 14px; }}
-    th         {{ background: #f9fafb; color: #6b7280; font-weight: 600;
-                  text-transform: uppercase; font-size: 11px; }}
-    .btn       {{ display: inline-block; margin-top: 20px; padding: 12px 28px;
-                  background: #7c3aed; color: #fff; text-decoration: none;
-                  border-radius: 6px; font-weight: 600; font-size: 15px; }}
-    .footer    {{ padding: 16px 32px; background: #f9fafb; border-top: 1px solid #e5e7eb;
-                  font-size: 12px; color: #9ca3af; text-align: center; }}
-  </style>
-</head>
-<body>
-<div class="container">
-  <div class="header">
-    <h1>⬆️ Bug Recurrence — Priority Escalated</h1>
-    <p>This bug has been detected again and remains unresolved</p>
-  </div>
-  <div class="body">
-    <div class="escalation-box">
-      <div class="label">Priority Escalation</div>
-      <div class="arrow">{old_priority} → {new_priority}</div>
-    </div>
-    <table>
-      <tr><th>Field</th><th>Value</th></tr>
-      <tr><td>Ticket</td><td><strong>{ticket_key}</strong></td></tr>
-      <tr><td>Title</td><td>{title}</td></tr>
-      <tr><td>Severity</td><td>{severity}</td></tr>
-      <tr><td>Failed Test</td><td><code style="font-size:12px">{test_name}</code></td></tr>
-      <tr><td>Recurrence At</td><td>{timestamp}</td></tr>
+def _build_ai_fix_success_email() -> str:
+    short_sha = COMMIT_SHA[:8] if COMMIT_SHA else "unknown"
+    return f"""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#0f1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0f1117;padding:40px 16px;">
+  <tr><td align="center">
+    <table width="620" cellpadding="0" cellspacing="0"
+           style="background:#1a1d27;border-radius:16px;border:1px solid #2d3148;">
+      <tr>
+        <td style="background:linear-gradient(135deg,#052e16 0%,#14532d 100%);
+                   padding:28px 32px;border-bottom:1px solid #2d3148;">
+          <h1 style="margin:0;color:#d1fae5;font-size:22px;font-weight:800;">
+            🎉 AI Fix Merged Successfully
+          </h1>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:28px 32px;">
+          <p style="color:#d1d5db;font-size:15px;line-height:1.6;">
+            The AI agent analyzed the failing tests, applied fixes, re-ran the full
+            test suite, and all tests passed. The fix has been automatically merged
+            into <strong style="color:#86efac;">main</strong>.
+          </p>
+          <table cellpadding="0" cellspacing="0" style="margin-top:12px;
+                 background:#111827;border-radius:8px;border:1px solid #1f2937;">
+            <tr>
+              <td style="padding:14px 20px;color:#6b7280;font-size:13px;width:130px;">Repository</td>
+              <td style="padding:14px 20px;color:#e5e7eb;font-size:13px;font-family:monospace;">{REPO}</td>
+            </tr>
+            <tr>
+              <td style="padding:14px 20px;color:#6b7280;font-size:13px;">Branch</td>
+              <td style="padding:14px 20px;color:#e5e7eb;font-size:13px;font-family:monospace;">{BRANCH} → main</td>
+            </tr>
+            <tr>
+              <td style="padding:14px 20px;color:#6b7280;font-size:13px;">Commit</td>
+              <td style="padding:14px 20px;color:#e5e7eb;font-size:13px;font-family:monospace;">{short_sha}</td>
+            </tr>
+          </table>
+          <div style="margin-top:28px;text-align:center;">
+            <a href="https://github.com/{REPO}/commits/main"
+               style="display:inline-block;padding:12px 28px;background:#22c55e;
+                      color:#fff;text-decoration:none;border-radius:8px;
+                      font-size:14px;font-weight:700;">
+              View Commit History
+            </a>
+          </div>
+        </td>
+      </tr>
     </table>
-    <p style="color:#dc2626; font-weight:600; margin-top:16px;">
-      ⚠️ This issue has been detected multiple times.
-      Please prioritize a fix immediately.
-    </p>
-    <a href="{ticket_url}" class="btn">View Jira Ticket →</a>
-  </div>
-  <div class="footer">
-    Generated automatically by Zero-Effort Bug Reporter •
-    {datetime.now().strftime('%Y-%m-%d %H:%M')}
-  </div>
-</div>
-</body>
-</html>
+  </td></tr>
+</table>
+</body></html>
 """
 
-    return _send(to_email, subject, html, ticket_key)
+
+def _build_ai_fix_failed_email() -> str:
+    return f"""
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#0f1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0f1117;padding:40px 16px;">
+  <tr><td align="center">
+    <table width="620" cellpadding="0" cellspacing="0"
+           style="background:#1a1d27;border-radius:16px;border:1px solid #2d3148;">
+      <tr>
+        <td style="background:linear-gradient(135deg,#450a0a 0%,#7f1d1d 100%);
+                   padding:28px 32px;border-bottom:1px solid #2d3148;">
+          <h1 style="margin:0;color:#fecaca;font-size:22px;font-weight:800;">
+            🤖 AI Fix Attempted — Tests Still Failing
+          </h1>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:28px 32px;">
+          <p style="color:#d1d5db;font-size:15px;line-height:1.6;">
+            The AI agent applied fixes but the test suite still has failures.
+            <strong style="color:#f87171;">No merge was performed.</strong>
+            Manual intervention is required.
+          </p>
+          <div style="margin-top:28px;text-align:center;">
+            <a href="{_manual_url()}"
+               style="display:inline-block;padding:12px 28px;background:#ef4444;
+                      color:#fff;text-decoration:none;border-radius:8px;
+                      font-size:14px;font-weight:700;">
+              🔧 Fix Manually
+            </a>
+          </div>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>
+"""
 
 
-def _send(to_email: str, subject: str, html: str, ticket_key: str) -> dict:
-    msg             = MIMEMultipart("alternative")
-    msg["From"]     = FROM_EMAIL or SMTP_USERNAME
-    msg["To"]       = to_email
-    msg["Subject"]  = subject
-    msg.attach(MIMEText(html, "html"))
+def send_email(subject: str, html_body: str) -> None:
+    if not all([SMTP_USER, SMTP_PASSWORD, NOTIFY_EMAIL]):
+        print("[email_notifier] Missing SMTP credentials or NOTIFY_EMAIL — skipping.")
+        return
 
-    try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.sendmail(
-                FROM_EMAIL or SMTP_USERNAME,
-                to_email,
-                msg.as_string(),
-            )
-        print(f"📧 Email sent → {to_email} ({ticket_key})")
-        return {"status": "success", "message": f"Email sent to {to_email}"}
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = SMTP_USER
+    msg["To"]      = NOTIFY_EMAIL
+    msg.attach(MIMEText(html_body, "html"))
 
-    except Exception as e:
-        print(f"📧 Email failed: {e}")
-        return {"status": "error", "message": str(e)}
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_USER, NOTIFY_EMAIL, msg.as_string())
+
+    print(f"[email_notifier] Email sent → {NOTIFY_EMAIL}")
 
 
-def _is_configured() -> bool:
-    return bool(SMTP_USERNAME and SMTP_PASSWORD)
+def main():
+    failed_tests = load_failed_tests()
+
+    if EMAIL_MODE == "ai_fix_success":
+        subject = f"✅ AI Fix Merged — {REPO} [{BRANCH}]"
+        body = _build_ai_fix_success_email()
+
+    elif EMAIL_MODE == "ai_fix_failed":
+        subject = f"❌ AI Fix Failed — Manual Review Needed — {REPO}"
+        body = _build_ai_fix_failed_email()
+
+    else:  # default: bug_report
+        status = "PASSED ✅" if TESTS_PASSED else f"FAILED ❌ ({len(failed_tests)} test(s))"
+        subject = f"[Bug Report] Build {status} — {REPO} [{BRANCH[:20]}]"
+        body = _build_bug_report_email(failed_tests)
+
+    send_email(subject, body)
 
 
-def send_ai_fix_proposal_email(
-    pr_url: str,
-    run_number: str,
-    to_email: str,
-    bug_reports: list = None,       # FIX: accept list of bug report dicts for detailed body
-    pr_branch: str = None,          # FIX: explicit branch name for the email
-) -> bool:
-    """Send email when AI fix is proposed and needs human approval.
-    
-    Now includes:
-    - Full bug report table (one row per failing test) so reviewer knows what broke
-    - Explicit PR branch name
-    - All bugs addressed, not just the first one
-    """
-    try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = f'🤖 AI Fix Proposal - Run #{run_number} - Approval Required'
-        msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
-        msg['To'] = to_email
-
-        # Build per-bug detail rows
-        bug_rows_html = ""
-        if bug_reports:
-            for idx, br in enumerate(bug_reports, 1):
-                meta      = br.get("metadata", {})
-                title     = br.get("title", "Unknown")
-                severity  = br.get("severity", "Unknown")
-                priority  = br.get("priority", "Unknown")
-                test_name = meta.get("test_name", "Unknown")
-                component = meta.get("affected_component", "Unknown")
-                error_type = meta.get("error_type", "Unknown")
-                # Pull plain-text root cause from description if available
-                description = br.get("description", "")
-                # Strip Jira markup for the email — grab the Summary section
-                root_cause = ""
-                if "h3. Summary" in description:
-                    after = description.split("h3. Summary")[-1]
-                    root_cause = after.split("\n\nh3.")[0].strip()[:200]
-                if not root_cause:
-                    root_cause = title[:150]
-
-                bug_rows_html += f"""
-        <tr style="background: {'#fff' if idx % 2 == 0 else '#f9fafb'};">
-          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px;">
-            <strong>Bug #{idx}</strong><br>
-            <code style="font-size:11px; color:#374151;">{test_name}</code>
-          </td>
-          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px;">{component}</td>
-          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px;">{error_type}</td>
-          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px;">
-            <span style="display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600;
-              background:{'#fee2e2' if severity=='Critical' else '#fef3c7' if severity=='High' else '#dbeafe'};
-              color:{'#dc2626' if severity=='Critical' else '#d97706' if severity=='High' else '#2563eb'};">
-              {severity}
-            </span>
-          </td>
-          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:12px; color:#6b7280;">{root_cause}</td>
-        </tr>"""
-        else:
-            bug_rows_html = """
-        <tr>
-          <td colspan="5" style="padding:12px; text-align:center; color:#9ca3af; font-size:13px;">
-            No bug report details available
-          </td>
-        </tr>"""
-
-        # PR branch display
-        branch_display = pr_branch or f"ai-fix-{run_number}"
-
-        html = f'''
-        <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; background:#f5f5f5; margin:0; padding:20px;">
-            <div style="max-width: 680px; margin: 0 auto; background:#fff; border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.1);">
-
-              <div style="background:#4f46e5; color:#fff; padding:24px 32px;">
-                <h2 style="margin:0; font-size:20px;">🤖 AI Fix Proposal</h2>
-                <p style="margin:6px 0 0; opacity:0.9; font-size:14px;">Zero-Effort Bug Reporter — Automated Fix</p>
-              </div>
-
-              <div style="padding:24px 32px;">
-
-                <div style="background:#fef3c7; padding:16px 20px; border-radius:8px; margin-bottom:20px; border-left:4px solid #f59e0b;">
-                  <h3 style="margin-top:0; color:#92400e;">⏳ Human Approval Required</h3>
-                  <table style="width:100%; border-collapse:collapse;">
-                    <tr>
-                      <td style="padding:4px 0; font-size:14px; color:#374151; width:120px;"><strong>Run:</strong></td>
-                      <td style="padding:4px 0; font-size:14px;">#{run_number}</td>
-                    </tr>
-                    <tr>
-                      <td style="padding:4px 0; font-size:14px; color:#374151;"><strong>Branch:</strong></td>
-                      <td style="padding:4px 0; font-size:14px;"><code style="background:#f3f4f6; padding:2px 6px; border-radius:4px;">{branch_display}</code></td>
-                    </tr>
-                    <tr>
-                      <td style="padding:4px 0; font-size:14px; color:#374151;"><strong>Pull Request:</strong></td>
-                      <td style="padding:4px 0; font-size:14px;">
-                        <a href="{pr_url}" style="color:#4f46e5; word-break:break-all;">{pr_url}</a>
-                      </td>
-                    </tr>
-                  </table>
-                </div>
-
-                <h3 style="color:#374151; margin-bottom:8px;">🐛 Bugs Detected &amp; Addressed</h3>
-                <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
-                  <thead>
-                    <tr style="background:#f9fafb;">
-                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Test</th>
-                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Component</th>
-                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Error Type</th>
-                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Severity</th>
-                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Root Cause</th>
-                    </tr>
-                  </thead>
-                  <tbody>{bug_rows_html}</tbody>
-                </table>
-
-                <h3 style="color:#374151;">How to Approve:</h3>
-                <ol style="padding-left:20px; font-size:14px;">
-                  <li>Review the code changes in the PR (link above)</li>
-                  <li>Go to <strong>Actions</strong> tab in your repo</li>
-                  <li>Select <strong>CI/CD — Test-First Gated Deploy</strong></li>
-                  <li>Click <strong>Run workflow</strong></li>
-                  <li>Select <strong>approve-ai-fix</strong></li>
-                </ol>
-
-                <h3 style="color:#374151;">How to Reject:</h3>
-                <ol style="padding-left:20px; font-size:14px;">
-                  <li>Same steps, but select <strong>reject-ai-fix</strong></li>
-                  <li>Jira ticket(s) will remain open for manual fix</li>
-                </ol>
-
-              </div>
-
-              <div style="padding:16px 32px; background:#f9fafb; border-top:1px solid #e5e7eb; font-size:12px; color:#9ca3af; text-align:center;">
-                Generated automatically by Zero-Effort Bug Reporter • {datetime.now().strftime('%Y-%m-%d %H:%M')}
-              </div>
-            </div>
-        </body>
-        </html>
-        '''
-
-        msg.attach(MIMEText(html, 'html'))
-
-        smtp_server = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
-        smtp_port   = int(os.getenv('SMTP_PORT', '587'))
-        username    = os.getenv('SMTP_USERNAME')
-        password    = os.getenv('SMTP_PASSWORD')
-
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(username, password)
-            server.send_message(msg)
-
-        print(f"📧 AI fix proposal email sent to {to_email}")
-        return True
-    except Exception as e:
-        print(f"⚠️ Failed to send AI fix proposal email: {e}")
-        return False
-
-
-def send_ai_fix_resolved_email(ticket_key: str, to_email: str) -> bool:
-    """Send email when AI fix is approved, merged, and deployed."""
-    try:
-        msg = MIMEText(f'''
-✅ Bug Resolved — AI Fix Deployed
-
-Ticket: {ticket_key}
-Status: RESOLVED
-
-The AI-generated fix was approved by a human reviewer, passed all tests,
-and has been deployed to production.
-
-No further action required.
-        ''')
-        msg['Subject'] = f'✅ {ticket_key} Resolved — AI Fix Deployed'
-        msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
-        msg['To'] = to_email
-
-        with smtplib.SMTP(os.getenv('SMTP_SERVER', 'smtp.gmail.com'), int(os.getenv('SMTP_PORT', '587'))) as server:
-            server.starttls()
-            server.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
-            server.send_message(msg)
-
-        print(f"📧 Resolution email sent to {to_email}")
-        return True
-    except Exception as e:
-        print(f"⚠️ Failed to send resolution email: {e}")
-        return False
-
-
-def send_manual_fix_required_email(ticket_key: str, jira_url: str, to_email: str) -> bool:
-    """Send email when AI cannot fix and manual intervention is needed."""
-    try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = f'🔧 Manual Fix Required — {ticket_key}'
-        msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
-        msg['To'] = to_email
-
-        html = f'''
-        <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-                <h2 style="color: #dc2626;">🔧 Manual Fix Required</h2>
-                <p>The AI Fix Agent was unable to generate an automatic fix for the failing tests.</p>
-                
-                <div style="background: #fee2e2; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc2626;">
-                    <h3 style="margin-top: 0; color: #991b1b;">Jira Ticket</h3>
-                    <p><strong>Ticket:</strong> <a href="{jira_url}/browse/{ticket_key}" style="color: #dc2626;">{ticket_key}</a></p>
-                </div>
-
-                <h3 style="color: #374151;">Next Steps:</h3>
-                <ol style="padding-left: 20px;">
-                    <li>Review the Jira ticket for failure details</li>
-                    <li>Fix the issue in your local environment</li>
-                    <li>Push the fix to the <code>main</code> branch</li>
-                    <li>CI will automatically test and deploy</li>
-                </ol>
-
-                <p style="background: #f0fdf4; padding: 10px; border-radius: 6px; color: #166534;">
-                    💡 <strong>Tip:</strong> Include <code>fix:</code> in your commit message for faster processing.
-                </p>
-            </div>
-        </body>
-        </html>
-        '''
-
-        msg.attach(MIMEText(html, 'html'))
-
-        with smtplib.SMTP(os.getenv('SMTP_SERVER', 'smtp.gmail.com'), int(os.getenv('SMTP_PORT', '587'))) as server:
-            server.starttls()
-            server.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
-            server.send_message(msg)
-
-        print(f"📧 Manual fix email sent to {to_email}")
-        return True
-    except Exception as e:
-        print(f"⚠️ Failed to send manual fix email: {e}")
-        return False
+if __name__ == "__main__":
+    main()
