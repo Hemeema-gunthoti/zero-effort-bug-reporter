@@ -75,7 +75,6 @@ def get_item(item_id):
 def api_list_items():
     return jsonify({"items": ITEMS, "count": len(ITEMS)})
 
-# FIX: Use jsonify for proper JSON response
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'}), 200
