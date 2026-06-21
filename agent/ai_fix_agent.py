@@ -599,7 +599,6 @@ def main():
     agent = AIFixAgent()
     result = agent.analyze_and_fix(args.test_output, args.mode)
     print(json.dumps(result, indent=2))
-#make changes
 
 if __name__ == "__main__":
     main()
