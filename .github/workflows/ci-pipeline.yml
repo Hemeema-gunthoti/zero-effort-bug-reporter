@@ -418,17 +418,39 @@ jobs:
           git config user.email "ai-fix@bot.com"
           git checkout -b "$BRANCH"
 
-          # FIX: Only apply actual code fixes (not metadata/artifacts)
-          for f in artifacts/ai_fixes/fix_app_*; do
-            [ -f "$f" ] || continue
-            ORIGINAL=$(basename "$f" | sed 's/^fix_//' | sed 's/_/\//g')
-            if [[ "$ORIGINAL" == app* ]]; then
-              cp "$f" "$ORIGINAL"
-              git add "$ORIGINAL"
-            fi
-          done
+          # FIX: Apply fixes via the manifest (path -> fix filename), which
+          # handles any path safely — including tests/test_login.py, where the
+          # old sed-based "_" -> "/" reversal would corrupt the filename
+          # (it would turn "test_login.py" into "test/login.py").
+          TOUCHED_TESTS="false"
+          if [ -f artifacts/ai_fixes/fix_manifest.json ]; then
+            python3 -c "
+          import json, shutil, os
 
-          # FIX: Verify only source files are staged
+          manifest = json.load(open('artifacts/ai_fixes/fix_manifest.json'))
+          touched_tests = False
+          for orig_path, fix_filename in manifest.items():
+              fix_path = os.path.join('artifacts/ai_fixes', fix_filename)
+              if not os.path.exists(fix_path):
+                  continue
+              if not (orig_path.startswith('app/') or orig_path.startswith('tests/')):
+                  print(f'Skipping unexpected path: {orig_path}')
+                  continue
+              os.makedirs(os.path.dirname(orig_path) or '.', exist_ok=True)
+              shutil.copy(fix_path, orig_path)
+              print(f'Applied fix to {orig_path}')
+              if orig_path.startswith('tests/'):
+                  touched_tests = True
+
+          open('touched_tests.flag', 'w').write('true' if touched_tests else 'false')
+          "
+            git add -A -- app tests 2>/dev/null || true
+            [ -f touched_tests.flag ] && TOUCHED_TESTS=$(cat touched_tests.flag)
+            rm -f touched_tests.flag
+          fi
+          echo "TOUCHED_TESTS=$TOUCHED_TESTS" >> $GITHUB_ENV
+
+          # FIX: Verify only source/test files are staged
           echo "=== Staged files ==="
           git diff --cached --name-only
 
@@ -447,6 +469,15 @@ jobs:
             git push origin "$BRANCH"
           }
 
+          # FIX: Add a review warning if the agent touched a test file, so a
+          # human specifically checks it wasn't weakened to force a pass.
+          REVIEW_NOTE=""
+          if [ "$TOUCHED_TESTS" = "true" ]; then
+            REVIEW_NOTE="
+          ### ⚠️ This fix modifies test file(s)
+          The agent determined the bug was in test data, not application code. Review the test diff carefully — confirm it only corrects a factual input value, and doesn't loosen or remove any assertion."
+          fi
+
           # FIX: gh CLI automatically uses GH_TOKEN env var - no explicit login needed
           PR_URL=$(gh pr create \
             --repo ${{ github.repository }} \
@@ -461,6 +492,7 @@ jobs:
 
           ### What Changed
           AI analyzed test failures and proposed code fixes.
+          $REVIEW_NOTE
 
           ### How to Review
           1. Check **Files changed** tab

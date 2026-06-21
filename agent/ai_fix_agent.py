@@ -246,11 +246,11 @@ class AIFixAgent:
             component_match = False
 
             for failure in failures:
-                error_text = f"{failure['test_name']} {failure['error_summary']} {failure.get('description', '')}".lower()
-                file_name = path.split("/")[-1].lower()
-                component = failure.get("component", "").lower()
-                error_type = failure.get("error_type", "").lower()
-                test_file = (failure.get("test_file") or "").lower()
+                raw_test_file = (failure.get("test_file") or "").replace("\\", "/")
+                if "tests/" in raw_test_file:
+                   rel_test_path = "tests/" + raw_test_file.split("tests/")[-1]
+                   if rel_test_path not in source_paths:
+                      source_paths.append(rel_test_path)
 
                 # Component-based matching (strong signal)
                 if component and component in path.lower():
@@ -338,7 +338,24 @@ RULES:
 4. Do NOT remove any existing @app.route definitions
 5. Return ONLY a single JSON object with file paths as keys and full file content as values
 6. Do NOT include markdown formatting, explanations, or multiple JSON objects
-7. Example format: {"app/main.py": "import flask..."}"""
+7. Example format: {"app/main.py": "import flask..."}
+8. Decide WHERE the actual bug is before fixing. If a test file is included above:
+   - If the test's expected input/output doesn't match constants already defined
+     in the application code (e.g. a hardcoded username/password dict), and the
+     test's own docstring/class name implies it should represent a VALID/working
+     case, the bug is almost certainly wrong test data — fix the test file's
+     literal values to match the application's existing constants. Do NOT change
+     the application's constants to match the test.
+   - If the application returns the wrong status code, wrong response shape, or
+     incorrect business logic relative to what the test (correctly) expects,
+     fix the application file instead.
+9. NEVER weaken, remove, or loosen a test assertion to make it pass artificially.
+   You may only correct factual test input (e.g. a typo'd credential, a wrong
+   expected value that contradicts the app's own documented behavior). Do not
+   change what a test checks for — only correct what's clearly wrong input/data.
+10. If unsure whether to fix the app or the test, prefer fixing the application
+    file — only fix a test file when the evidence that the test itself is wrong
+    is unambiguous."""
 
         try:
             response = self.client.chat.completions.create(
@@ -470,9 +487,27 @@ RULES:
     def _save_fixes(self, fixes: Dict, diffs: Dict, mode: str, scores: Dict, jira_ticket: Optional[str]) -> None:
         AI_FIX_DIR.mkdir(parents=True, exist_ok=True)
 
+        manifest = {}
         for path, content in fixes.items():
             safe_name = path.replace("/", "_")
-            (AI_FIX_DIR / f"fix_{safe_name}").write_text(content)
+            fix_filename = f"fix_{safe_name}"
+            (AI_FIX_DIR / fix_filename).write_text(content)
+            manifest[path] = fix_filename
+
+        # FIX: manifest maps original repo path -> generated fix filename, so
+        # the workflow doesn't have to reverse-engineer the path from the
+        # filename. That reversal breaks for paths like tests/test_login.py,
+        # since a blind "_" -> "/" swap would wrongly split "test_login.py"
+        # into "test/login.py".
+        manifest_path = AI_FIX_DIR / "fix_manifest.json"
+        existing_manifest = {}
+        if manifest_path.exists():
+            try:
+                existing_manifest = json.loads(manifest_path.read_text())
+            except Exception:
+                existing_manifest = {}
+        existing_manifest.update(manifest)
+        manifest_path.write_text(json.dumps(existing_manifest, indent=2))
 
         for path, diff in diffs.items():
             safe_name = path.replace("/", "_")
