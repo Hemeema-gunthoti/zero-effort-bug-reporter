@@ -25,21 +25,6 @@ from config.settings import settings
 ARTIFACT_DIR = Path(os.path.dirname(__file__)).parent / "artifacts"
 AI_FIX_DIR = ARTIFACT_DIR / "ai_fixes"
 
-# FIX 1: Use the 8b-instant model for fix generation — it has 500k TPD
-# vs llama-3.3-70b-versatile's 100k TPD, preventing rate-limit errors.
-FIX_MODEL = os.getenv("GROQ_FIX_MODEL", "llama-3.1-8b-instant")
-
-# FIX 2: Files that are never the cause of logic/auth/JS bugs.
-# Excluding them prevents CSS (14KB alone) from consuming the token budget.
-_EXCLUDE_FROM_FIX = {
-    "app/static/css/style.css",
-    "app/templates/base.html",
-    "app/templates/dashboard.html",
-    "app/templates/items.html",
-    "app/templates/item_detail.html",
-    "app/templates/index.html",
-}
-
 
 class AIFixAgent:
     def __init__(self):
@@ -70,7 +55,6 @@ class AIFixAgent:
         print(f"🤖 AI FIX AGENT (BATCH)")
         print(f" Reports: {len(bug_report_paths)}")
         print(f" Mode: {mode}")
-        print(f" Fix model: {FIX_MODEL}")
         print(f"{'='*60}")
 
         all_failures = []
@@ -136,10 +120,10 @@ class AIFixAgent:
                     "jira_ticket": jira_ticket,
                 }
 
-        # FIX 3: Always include app/main.py (the most common file to fix), then
-        # fill remaining slots with the top app-code files (not test files) first.
-        # Test files score high because their names appear in stack traces, but
-        # the actual bugs are almost always in application code.
+        # Always include app/main.py (the most common file to fix), then fill
+        # remaining slots with top-scoring non-test app files first, then test
+        # files only if slots remain. Test files score high because their names
+        # appear in stack traces, but bugs are almost always in app code.
         # Cap total at 3 files to keep token usage manageable.
         MAX_FILES = 3
         selected = {}
@@ -294,8 +278,6 @@ class AIFixAgent:
     def _score_files_for_fixing(self, failures: List[Dict]) -> Dict[str, Dict]:
         files = {}
 
-        # FIX 2 applied here: removed CSS and large templates from the candidate
-        # list. They are never the cause of the login/auth/JS bugs we fix.
         source_paths = [
             "app/main.py",
             "app/routes.py",
@@ -303,8 +285,12 @@ class AIFixAgent:
             "app/login.py",
             "app/views.py",
             "app/templates/login.html",
+            "app/templates/dashboard.html",
+            "app/templates/base.html",
+            "app/templates/index.html",
             "app/static/js/app.js",
             "app/static/js/login.js",
+            "app/static/css/style.css",
         ]
 
         # Discover test files BEFORE the outer loop so they are read and scored.
@@ -316,10 +302,6 @@ class AIFixAgent:
                     source_paths.append(rel_test_path)
 
         for path in source_paths:
-            # Skip explicitly excluded files even if somehow added above
-            if path in _EXCLUDE_FROM_FIX:
-                continue
-
             full_path = Path(os.path.dirname(__file__)).parent / path
             if not full_path.exists():
                 continue
@@ -350,14 +332,14 @@ class AIFixAgent:
                         score += 0.3
                         reasons.append(f"test_file: {test_stem}")
 
-                # FIX 3 (scoring): Don't boost test files for appearing in error
-                # text — test filenames always appear in stack traces, which would
-                # otherwise rank them above the app files that actually need fixing.
+                # Do not boost test files for appearing in error text —
+                # test filenames always appear in stack traces, which would
+                # otherwise rank them above the app files that need fixing.
                 if file_name and file_name in error_text and not path.startswith("tests/"):
                     score += 0.3
                     reasons.append(f"mentioned: {file_name}")
 
-                # Penalise test files so app files win on ties
+                # Penalise test files so app files win on equal scores.
                 if path.startswith("tests/"):
                     score -= 0.15
 
@@ -440,27 +422,18 @@ RULES:
      add explicit el.style.display = 'block' alongside classList.add('show').
 10. NEVER weaken or remove a test assertion. Only correct factual wrong input/data."""
 
-        # FIX 4: Calculate max_tokens dynamically based on actual file sizes so
-        # the LLM never runs out of output budget mid-file.
-        # Formula: sum of all file chars / 4 (chars-per-token estimate) + 600
-        # overhead for JSON structure and whitespace, capped at 4000.
-        total_output_chars = sum(len(c) for c in source_files.values())
-        max_output_tokens = min(int(total_output_chars / 4) + 600, 4000)
-        print(f"📊 Prompt chars: {len(prompt)} (~{len(prompt)//4} tokens) | max_output_tokens: {max_output_tokens}")
-
         try:
             response = self.client.chat.completions.create(
-                model=FIX_MODEL,
+                model=settings.GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": "You are a precise code fixer. Output ONLY valid JSON. No markdown. No explanations. Never truncate output."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.05,
-                max_tokens=max_output_tokens,
+                max_tokens=4000,
             )
 
             raw = response.choices[0].message.content.strip()
-            print(f"📊 Tokens used: input={response.usage.prompt_tokens}, output={response.usage.completion_tokens}, total={response.usage.total_tokens}")
             fixes = self._extract_json_from_response(raw, source_files)
 
             if fixes:
@@ -558,7 +531,6 @@ RULES:
                     for m in missing:
                         print(f"   • {m!r}")
                     print(f"   Keeping original app/main.py.")
-                    # Do not include — leave file unchanged on disk
                     continue
 
             validated[path] = content
