@@ -1,18 +1,3 @@
-"""
-tests/test_login.py
--------------------
-Login tests.
-
-Passing  → confirm the happy path works (good baseline signal in CI).
-Failing  → expose real application bugs and trigger artifact capture.
-
-FAIL 1: test_login_with_invalid_password_shows_error
-        App returns 401 but never makes #error-message visible.
-
-FAIL 2: test_login_with_empty_credentials_shows_validation
-        App never makes #validation-error visible.
-"""
-
 import os
 import time
 import pytest
@@ -23,13 +8,8 @@ from selenium.common.exceptions import TimeoutException
 
 BASE_URL = os.getenv("APP_URL", "http://localhost:5000")
 
-
 class TestLoginHappyPath:
-    """These tests PASS — they confirm the app is alive and the
-    basic login flow works."""
-
     def test_login_page_loads(self, driver):
-        """Smoke test: page renders with all three form elements."""
         driver.get(BASE_URL)
         assert "Sign in" in driver.page_source
         driver.find_element(By.ID, "username")
@@ -37,10 +17,9 @@ class TestLoginHappyPath:
         driver.find_element(By.ID, "login-btn")
 
     def test_valid_login_redirects_to_dashboard(self, driver):
-        """Valid credentials should redirect the browser to /dashboard."""
         driver.get(BASE_URL)
-        driver.find_element(By.ID, "username").send_keys("admin")
-        driver.find_element(By.ID, "password").send_keys("password123")
+        driver.find_element(By.ID, "username").send_keys("user1")
+        driver.find_element(By.ID, "password").send_keys("user123")
         driver.find_element(By.ID, "login-btn").click()
 
         try:
@@ -50,38 +29,23 @@ class TestLoginHappyPath:
                 f"Expected redirect to /dashboard. Current URL: {driver.current_url}"
             )
 
-
 class TestLoginFailurePaths:
-    """These tests FAIL — they expose real bugs and feed the AI agent."""
-
     def test_login_with_invalid_password_shows_error(self, driver):
-        """
-        After a 401 response the #error-message element should become
-        visible. It exists in the DOM but the JS never sets display:block.
-
-        Expected failure: AssertionError — is_displayed() returns False.
-        """
         driver.get(BASE_URL)
         driver.find_element(By.ID, "username").send_keys("admin")
         driver.find_element(By.ID, "password").send_keys("totally_wrong_password")
         driver.find_element(By.ID, "login-btn").click()
 
-        time.sleep(1)   # Let the fetch() call complete
+        time.sleep(1)
 
         error_el = driver.find_element(By.ID, "error-message")
         assert error_el.is_displayed(), (
-            "BUG: #error-message exists in DOM but is never made visible. "
+            "BUG: #error-message exists in DOM but is never made visible."
             "The JS fetch handler does not set display:block after a 401."
         )
         assert "Invalid" in error_el.text
 
     def test_login_with_empty_credentials_shows_validation(self, driver):
-        """
-        Clicking Sign in with empty fields should show #validation-error.
-        The JS logs a console warning but never updates the DOM.
-
-        Expected failure: AssertionError — is_displayed() returns False.
-        """
         driver.get(BASE_URL)
         driver.find_element(By.ID, "login-btn").click()
 
@@ -89,6 +53,6 @@ class TestLoginFailurePaths:
 
         val_el = driver.find_element(By.ID, "validation-error")
         assert val_el.is_displayed(), (
-            "BUG: #validation-error exists in DOM but is never made visible. "
+            "BUG: #validation-error exists in DOM but is never made visible."
             "The JS handler calls console.warn() but does not update display."
         )
