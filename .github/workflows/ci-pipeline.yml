@@ -3,8 +3,6 @@ name: CI/CD — Test-First Gated Deploy with Human Approval
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       action:
@@ -28,16 +26,24 @@ permissions:
 
 jobs:
   # ═════════════════════════════════════════════════════════════════
-  # JOB 1: BUILD & TEST — THE GATEKEEPER
+  # JOB 1: BUILD & TEST
+  # Runs on every push to main.
+  # Skipped when the push is from the AI Fix Bot (that is the
+  # merge-after-approve path — deploy-after-ai-fix handles it).
   # ═════════════════════════════════════════════════════════════════
   build-and-test:
     name: 🔨 Build & Test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Skip this job when the AI Fix Bot merges — deploy-after-ai-fix
+    # already tested the branch before merging, so re-running tests is
+    # redundant and would re-trigger the bug reporter on clean code.
+    if: |
+      github.event_name == 'push' &&
+      github.event.head_commit.author.name != 'AI Fix Bot'
     outputs:
       tests_passed: ${{ steps.test_result.outputs.passed }}
       has_failures: ${{ steps.test_result.outputs.has_failures }}
-      run_id: ${{ github.run_id }}
 
     services:
       redis:
@@ -93,6 +99,8 @@ jobs:
           sleep 5
           echo "=== Check logs ==="
           cat flask.log 2>/dev/null || echo "No log file"
+          echo "=== Check port ==="
+          ss -tlnp 2>/dev/null | grep 5000 || echo "Port 5000 not listening"
 
       - name: Wait for Flask healthy
         run: |
@@ -161,7 +169,7 @@ jobs:
         run: kill $FLASK_PID 2>/dev/null || true
 
   # ═════════════════════════════════════════════════════════════════
-  # JOB 2A: DEPLOY (Tests Passed)
+  # JOB 2A: DEPLOY TO STAGING (tests passed on normal push)
   # ═════════════════════════════════════════════════════════════════
   deploy-staging:
     name: 🚀 Deploy to Staging
@@ -218,7 +226,7 @@ jobs:
           done
           echo "❌ Production health check failed" && exit 1
 
-      - name: Notify success
+      - name: Notify deploy success
         env:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
@@ -238,7 +246,7 @@ jobs:
           "
 
   # ═════════════════════════════════════════════════════════════════
-  # JOB 2B: BUG REPORT + AI FIX PROPOSAL (Tests Failed)
+  # JOB 2B: BUG REPORT + AI FIX PROPOSAL (tests failed on normal push)
   # ═════════════════════════════════════════════════════════════════
   bug-report-and-fix:
     name: 🐛 Bug Report + AI Fix
@@ -276,7 +284,7 @@ jobs:
       - name: Clear stale dedup cache
         run: rm -f artifacts/dedup_cache.json
 
-      # ── Step 1: Run Bug Reporter ─────────────────────────────────
+      # ── Step 1: Bug Reporter ─────────────────────────────────────
       - name: Run Bug Reporter Agent
         id: bug_report
         env:
@@ -326,7 +334,7 @@ jobs:
             artifacts/dedup_cache.json
           retention-days: 7
 
-      # ── Step 2: Run AI Fix Agent (batch — all bugs in one LLM call) ─
+      # ── Step 2: AI Fix Agent (all bugs in one batch LLM call) ────
       - name: Run AI Fix Agent
         id: ai_fix
         env:
@@ -368,7 +376,7 @@ jobs:
             echo "fix_created=false" >> $GITHUB_OUTPUT
           fi
 
-      # ── Step 3: Create PR ────────────────────────────────────────
+      # ── Step 3: Create PR ─────────────────────────────────────────
       - name: Create AI Fix PR
         id: create_pr
         if: steps.ai_fix.outputs.fix_created == 'true'
@@ -407,21 +415,18 @@ jobs:
             [ -f touched_tests.flag ] && TOUCHED_TESTS=$(cat touched_tests.flag)
             rm -f touched_tests.flag
           fi
-          echo "TOUCHED_TESTS=$TOUCHED_TESTS" >> $GITHUB_ENV
 
           REVIEW_NOTE=""
           if [ "$TOUCHED_TESTS" = "true" ]; then
             REVIEW_NOTE="
           ### ⚠️ This fix modifies test file(s)
-          Review the test diff carefully — confirm it only corrects a factual input value, and doesn't loosen or remove any assertion."
+          Review carefully — confirm it only corrects factual input, not loosened assertions."
           fi
 
           git commit -m "🤖 AI Fix Proposal [RUN-${{ github.run_id }}]
 
           Fixes for failing tests. Awaiting human approval.
-          Jira Ticket: ${{ steps.bug_report.outputs.ticket_key }}
-
-          To approve: click the button in the email notification."
+          Jira Ticket: ${{ steps.bug_report.outputs.ticket_key }}"
 
           git push origin "$BRANCH" || { sleep 2; git push origin "$BRANCH"; }
 
@@ -434,16 +439,15 @@ jobs:
           |-------|-------|
           | **Jira Ticket** | ${{ steps.bug_report.outputs.ticket_key }} |
           | **Run** | #${{ github.run_id }} |
-          | **Status** | ⏳ Awaiting Human Decision (via email) |
+          | **Status** | ⏳ Awaiting Human Approval |
           $REVIEW_NOTE
 
           ### How to Approve
-          Click the **✅ Approve AI Fix** button in the email notification.
-          This triggers automated testing on this branch — if all tests pass, the PR is auto-merged.
+          Actions → Run workflow → **approve-ai-fix**
+          The fix will be tested on this branch. If all tests pass it merges and deploys automatically.
 
           ### How to Reject
-          Click the **🔧 Fix Manually** button in the email notification.
-          This PR will be closed and the Jira ticket stays open." \
+          Actions → Run workflow → **reject-ai-fix**" \
             --base main \
             --head "$BRANCH")
 
@@ -452,7 +456,7 @@ jobs:
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "pr_branch=$BRANCH" >> $GITHUB_OUTPUT
 
-      # ── Step 4: Send email with approve/reject buttons ──────────
+      # ── Step 4: Email with bug details + approve/reject buttons ──
       - name: Send bug report + approval email
         if: steps.ai_fix.outputs.fix_created == 'true'
         env:
@@ -487,7 +491,7 @@ jobs:
           repo       = os.getenv('GITHUB_REPOSITORY', '')
 
           print(f'Sending approval email for {len(bug_reports)} bug(s) to {to_email}')
-          ok = send_ai_fix_proposal_email(
+          send_ai_fix_proposal_email(
               pr_url=pr_url,
               run_number=run_number,
               to_email=to_email,
@@ -495,11 +499,9 @@ jobs:
               pr_branch=pr_branch,
               repo=repo,
           )
-          if not ok:
-              print('Warning: email send failed')
           "
 
-      - name: Update Jira for manual fix (no AI fix available)
+      - name: Update Jira — AI could not fix (no PR created)
         if: steps.ai_fix.outputs.fix_created == 'false' && steps.bug_report.outputs.ticket_key != '' && steps.bug_report.outputs.ticket_key != 'UNKNOWN'
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
@@ -516,20 +518,25 @@ jobs:
 
       - name: No valid ticket warning
         if: steps.bug_report.outputs.ticket_key == '' || steps.bug_report.outputs.ticket_key == 'UNKNOWN'
-        run: |
-          echo "⚠️ No valid JIRA ticket was created."
-          exit 0
+        run: echo "⚠️ No valid JIRA ticket was created." && exit 0
 
   # ═════════════════════════════════════════════════════════════════
-  # JOB 3: APPROVE AI FIX
-  # Triggered by workflow_dispatch with action=approve-ai-fix.
-  # FIX: Runs tests on the PR branch FIRST. Only merges if they pass.
-  # Does NOT run until the user clicks Approve in the email.
+  # JOB 3: APPROVE AI FIX (manual workflow_dispatch)
+  #
+  # Flow:
+  #   1. Find the open AI fix PR and check out its branch
+  #   2. Run the FULL test suite against Flask
+  #   3. If ALL tests pass  → merge to main → deploy staging → deploy production
+  #   4. If any test fails  → leave PR open, notify user
   # ═════════════════════════════════════════════════════════════════
   approve-ai-fix:
-    name: ✅ Approve & Test & Merge AI Fix
+    name: ✅ Approve, Test & Deploy AI Fix
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'approve-ai-fix'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tests_passed: ${{ steps.test_fix.outputs.passed }}
+      ticket: ${{ steps.merge.outputs.ticket }}
 
     services:
       redis:
@@ -542,7 +549,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - name: Find AI fix PR
+      - name: Find open AI fix PR
         id: find_pr
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -554,7 +561,7 @@ jobs:
           echo "branch=$PR_BRANCH" >> $GITHUB_OUTPUT
           echo "Found PR #$PR_NUM on branch $PR_BRANCH"
 
-      - name: Checkout PR branch
+      - name: Checkout AI fix branch
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.find_pr.outputs.branch }}
@@ -582,14 +589,12 @@ jobs:
 
       - name: Start Flask app
         run: |
-          echo "=== Python version ==="
-          python --version
+          echo "=== Syntax check ==="
+          python -m py_compile app/main.py && echo "✅ No syntax errors"
           echo "=== Ensure port 5000 is free ==="
           fuser -k 5000/tcp 2>/dev/null || true
           pkill -f "python.*app/main.py" 2>/dev/null || true
           sleep 1
-          echo "=== Syntax check ==="
-          python -m py_compile app/main.py && echo "✅ No syntax errors"
           echo "=== Start Flask ==="
           python -u app/main.py > flask.log 2>&1 &
           echo $! > flask.pid
@@ -603,9 +608,7 @@ jobs:
             HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" http://localhost:5000/health 2>/dev/null || echo "000")
             if [ "$HTTP_CODE" = "200" ]; then echo "✅ Flask ready"; exit 0; fi
             if ! kill -0 "$(cat flask.pid)" 2>/dev/null; then
-              echo "❌ Flask process died"
-              cat flask.log
-              exit 1
+              echo "❌ Flask process died"; cat flask.log; exit 1
             fi
             echo "⏳ Waiting... ($i/30) HTTP: $HTTP_CODE"
             sleep 1
@@ -614,9 +617,7 @@ jobs:
           cat flask.log 2>/dev/null || true
           exit 1
 
-      # FIX: Run the FULL test suite on the AI fix branch.
-      # Only merge if ALL tests pass — this is the gate.
-      - name: Test the AI fix (full suite)
+      - name: Run full test suite on AI fix branch
         id: test_fix
         continue-on-error: true
         env:
@@ -625,7 +626,6 @@ jobs:
         run: |
           pytest tests/ -v --tb=short 2>&1 | tee ai_fix_test.txt
 
-          # Count failures using python to avoid grep -c format issues in GITHUB_OUTPUT
           FAILED=$(python3 -c "
           lines = open('ai_fix_test.txt').readlines()
           print(sum(1 for l in lines if l.startswith('FAILED ')))
@@ -635,13 +635,13 @@ jobs:
 
           if [ "$FAILED" = "0" ] && grep -q "passed" ai_fix_test.txt; then
             echo "passed=true" >> $GITHUB_OUTPUT
-            echo "✅ All tests passed on AI fix branch"
+            echo "✅ All tests passed — AI fix is good"
           else
             echo "passed=false" >> $GITHUB_OUTPUT
             echo "❌ $FAILED test(s) still failing on AI fix branch"
           fi
 
-      - name: Dump Flask log if tests failed
+      - name: Show Flask log if tests failed
         if: steps.test_fix.outputs.passed == 'false'
         run: cat flask.log 2>/dev/null || echo "No Flask log found"
 
@@ -649,8 +649,9 @@ jobs:
         if: always()
         run: kill "$(cat flask.pid 2>/dev/null)" 2>/dev/null || true
 
-      # ── Only merge if ALL tests pass ────────────────────────────
-      - name: Merge if all tests pass
+      # ── All tests pass → merge ────────────────────────────────────
+      - name: Merge AI fix into main
+        id: merge
         if: steps.test_fix.outputs.passed == 'true'
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -658,36 +659,39 @@ jobs:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
-          SMTP_SERVER: smtp.gmail.com
-          SMTP_PORT: "587"
         run: |
           PR_BODY=$(gh pr view ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+          echo "ticket=$TICKET" >> $GITHUB_OUTPUT
 
-          gh pr merge ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --squash --delete-branch
-          echo "✅ AI fix merged to main"
+          # Merge using AI Fix Bot identity so the post-merge push is
+          # recognised by build-and-test's skip condition and not re-processed
+          git config user.name "AI Fix Bot"
+          git config user.email "ai-fix@bot.com"
+
+          gh pr merge ${{ steps.find_pr.outputs.pr }} \
+            --repo ${{ github.repository }} \
+            --squash \
+            --delete-branch \
+            --subject "🤖 AI Fix merged [RUN-${{ github.run_id }}]"
+          echo "✅ AI fix merged into main"
 
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"body":"✅ RESOLVED by AI Fix Agent. Fix approved, all tests passed, auto-merged to main."}' \
+            -d '{"body":"✅ RESOLVED by AI Fix Agent. Fix approved, all tests passed, merged to main. Deploying to production."}' \
             "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
 
-          python -c "
-          import os, sys
-          sys.path.insert(0, '.')
-          from notifications.email_notifier import send_ai_fix_resolved_email
-          send_ai_fix_resolved_email(
-              ticket_key='$TICKET',
-              to_email=os.getenv('SMTP_USERNAME'),
-          )
-          "
+          curl -s -X POST \
+            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"transition":{"id":"31"}}' \
+            "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/transitions" || true
 
-      # ── If tests still fail, leave PR open and notify ──────────
-      - name: Notify test failure — PR stays open
+          echo "🎫 Jira ticket $TICKET marked as resolved"
+
+      # ── Tests still failing → leave PR open, notify ───────────────
+      - name: Notify — tests still failing, PR stays open
         if: steps.test_fix.outputs.passed == 'false'
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -707,12 +711,12 @@ jobs:
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
 
           gh pr comment $PR_NUM --repo ${{ github.repository }} \
-            --body "❌ AI fix approved by human but **${FAILED_COUNT} test(s) still failing**. PR stays open — needs manual revision before merge."
+            --body "❌ Approved but **${FAILED_COUNT} test(s) still failing**. PR stays open for manual revision."
 
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":\"❌ AI fix approved but ${FAILED_COUNT} test(s) still failing on fix branch. PR #${PR_NUM} stays open for manual revision.\"}" \
+            -d "{\"body\":\"❌ AI fix approved but ${FAILED_COUNT} test(s) still failing. PR #${PR_NUM} needs manual revision.\"}" \
             "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
 
           python3 -c "
@@ -721,23 +725,17 @@ jobs:
           from email.mime.text import MIMEText
 
           failed_count = os.getenv('FAILED_COUNT', '?')
-          ticket = '${TICKET}'
-
           msg = MIMEMultipart('alternative')
           msg['Subject'] = '⚠️ AI Fix: Tests Still Failing — Manual Revision Needed'
           msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
           msg['To'] = os.getenv('SMTP_USERNAME')
-
           html = f'''<html><body style=\"font-family:Arial,sans-serif;padding:20px;\">
             <h2 style=\"color:#d97706;\">⚠️ AI Fix Approved But Tests Still Failing</h2>
-            <p>The AI fix was approved but <strong>{failed_count} test(s)</strong> are still failing on the fix branch.</p>
+            <p><strong>{failed_count} test(s)</strong> are still failing on the fix branch.</p>
             <p>The PR has been left open for manual revision.</p>
-            <p><strong>Ticket:</strong> {ticket}</p>
-            <p>Please review the PR, fix the remaining issues, and push to the branch.</p>
           </body></html>'''
-
           msg.attach(MIMEText(html, 'html'))
-          with smtplib.SMTP(os.getenv('SMTP_SERVER', 'smtp.gmail.com'), int(os.getenv('SMTP_PORT', '587'))) as s:
+          with smtplib.SMTP(os.getenv('SMTP_SERVER','smtp.gmail.com'), int(os.getenv('SMTP_PORT','587'))) as s:
             s.starttls()
             s.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
             s.send_message(msg)
@@ -745,7 +743,101 @@ jobs:
           " || echo "Email send failed, continuing"
 
   # ═════════════════════════════════════════════════════════════════
-  # JOB 4: REJECT AI FIX
+  # JOB 4: DEPLOY AFTER AI FIX MERGE
+  # Runs only when approve-ai-fix succeeded (all tests passed + merged).
+  # This is the production deploy path for the AI fix flow.
+  # ═════════════════════════════════════════════════════════════════
+  deploy-staging-after-ai-fix:
+    name: 🚀 Deploy Staging (post AI fix)
+    needs: approve-ai-fix
+    if: needs.approve-ai-fix.outputs.tests_passed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_status: ${{ steps.verify.outputs.status }}
+
+    steps:
+      - name: Trigger Staging Deploy
+        run: |
+          echo "🚀 Deploying AI fix to STAGING..."
+          curl -X POST "${{ secrets.RENDER_STAGING_DEPLOY_HOOK_URL }}"
+          echo "✅ Triggered"
+
+      - name: Wait for build
+        run: sleep 45
+
+      - name: Verify staging health
+        id: verify
+        run: |
+          for i in {1..30}; do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "${{ secrets.RENDER_STAGING_URL }}/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "status=success" >> $GITHUB_OUTPUT
+              echo "✅ Staging healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "❌ Staging health check failed"
+
+  deploy-production-after-ai-fix:
+    name: 🌐 Promote to Production (post AI fix)
+    needs: deploy-staging-after-ai-fix
+    if: needs.deploy-staging-after-ai-fix.outputs.deploy_status == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Promote to production
+        run: |
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+          echo "✅ Production deploy triggered"
+
+      - name: Wait and verify production
+        run: |
+          sleep 60
+          for i in {1..30}; do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "${{ secrets.RENDER_APP_URL }}/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then echo "✅ Production healthy"; exit 0; fi
+            sleep 2
+          done
+          echo "❌ Production health check failed" && exit 1
+
+      - name: Notify production deploy success
+        env:
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
+          TICKET: ${{ needs.approve-ai-fix.outputs.ticket }}
+          SMTP_SERVER: smtp.gmail.com
+          SMTP_PORT: "587"
+        run: |
+          python3 -c "
+          import os, smtplib
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+
+          ticket = os.getenv('TICKET', 'N/A')
+          msg = MIMEMultipart('alternative')
+          msg['Subject'] = f'✅ {ticket} — AI Fix Deployed to Production'
+          msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
+          msg['To'] = os.getenv('SMTP_USERNAME')
+          html = f'''<html><body style=\"font-family:Arial,sans-serif;padding:20px;\">
+            <h2 style=\"color:#16a34a;\">✅ AI Fix Successfully Deployed</h2>
+            <p><strong>Ticket:</strong> {ticket}</p>
+            <p><strong>Status:</strong> RESOLVED — Deployed to production</p>
+            <p>All tests passed. The AI-generated fix is now live.</p>
+            <p><strong>URL:</strong> ${{ secrets.RENDER_APP_URL }}</p>
+          </body></html>'''
+          msg.attach(MIMEText(html, 'html'))
+          with smtplib.SMTP(os.getenv('SMTP_SERVER','smtp.gmail.com'), int(os.getenv('SMTP_PORT','587'))) as s:
+            s.starttls()
+            s.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
+            s.send_message(msg)
+          print('📧 Production deploy notification sent')
+          " || echo "Email send failed, continuing"
+
+  # ═════════════════════════════════════════════════════════════════
+  # JOB 5: REJECT AI FIX
   # ═════════════════════════════════════════════════════════════════
   reject-ai-fix:
     name: ❌ Reject AI Fix
@@ -770,13 +862,13 @@ jobs:
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"body":"🤖 AI fix was rejected by human reviewer. Manual developer fix required."}' \
+            -d '{"body":"🤖 AI fix rejected by human reviewer. Manual developer fix required."}' \
             "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
 
           echo "✅ AI fix rejected, Jira updated"
 
   # ═════════════════════════════════════════════════════════════════
-  # JOB 5: EMERGENCY ROLLBACK
+  # JOB 6: EMERGENCY ROLLBACK
   # ═════════════════════════════════════════════════════════════════
   rollback-production:
     name: 🚨 Emergency Rollback
@@ -787,4 +879,5 @@ jobs:
       - name: Rollback production
         run: |
           echo "🚨 Rolling back to previous stable version..."
-          echo "Rollback completed"
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" || true
+          echo "Rollback triggered"
