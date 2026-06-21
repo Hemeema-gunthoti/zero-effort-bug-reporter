@@ -126,10 +126,8 @@ jobs:
           RUN_ID:           ${{ github.run_id }}
           TESTS_PASSED:     ${{ needs.build-and-test.outputs.tests_passed }}
           FAILURE_SUMMARY:  ${{ needs.build-and-test.outputs.failure_summary }}
-          # Webhook URL hosted on your server / Render that handles button clicks
           WEBHOOK_BASE_URL: ${{ secrets.WEBHOOK_BASE_URL }}
-        run: |
-          python notifications/email_notifier.py
+        run: python notifications/email_notifier.py
 
   # ─── STEP 3: AI Fix (triggered ONLY after build-and-test fails + user picks AI Fix) ───
   # This job does NOT run automatically — it is dispatched by the webhook handler
