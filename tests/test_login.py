@@ -41,7 +41,7 @@ class TestLoginFailurePaths:
         """After a 401 response the #error-message element should become
         visible. It exists in the DOM but the JS never sets display:block."""
         driver.get(BASE_URL)
-        driver.find_element(By.ID, "username").send_keys("user1")
+        driver.find_element(By.ID, "username").send_keys("admin")
         driver.find_element(By.ID, "password").send_keys("wrongpassword")
         driver.find_element(By.ID, "login-btn").click()
 
