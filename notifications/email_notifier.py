@@ -17,19 +17,19 @@ from email.mime.text import MIMEText
 # ──────────────────────────────────────────────
 # Config from environment
 # ──────────────────────────────────────────────
-SMTP_HOST       = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT       = int(os.environ.get("SMTP_PORT", 587))
-SMTP_USER       = os.environ.get("SMTP_USER", "")
-SMTP_PASSWORD   = os.environ.get("SMTP_PASSWORD", "")
-NOTIFY_EMAIL    = os.environ.get("NOTIFY_EMAIL", "")
-REPO            = os.environ.get("REPO", "")
-BRANCH          = os.environ.get("BRANCH", "main")
-COMMIT_SHA      = os.environ.get("COMMIT_SHA", "")
-RUN_ID          = os.environ.get("RUN_ID", "")
-TESTS_PASSED    = os.environ.get("TESTS_PASSED", "false").lower() == "true"
-FAILURE_SUMMARY = os.environ.get("FAILURE_SUMMARY", "")
-WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "").rstrip("/")
-EMAIL_MODE      = os.environ.get("EMAIL_MODE", "bug_report")  # bug_report | ai_fix_success | ai_fix_failed
+SMTP_HOST        = os.environ.get("SMTP_HOST")  or "smtp.gmail.com"
+SMTP_PORT        = int(os.environ.get("SMTP_PORT") or 587)
+SMTP_USER        = os.environ.get("SMTP_USER")  or ""
+SMTP_PASSWORD    = os.environ.get("SMTP_PASSWORD") or ""
+NOTIFY_EMAIL     = os.environ.get("NOTIFY_EMAIL") or ""
+REPO             = os.environ.get("REPO")        or ""
+BRANCH           = os.environ.get("BRANCH")      or "main"
+COMMIT_SHA       = os.environ.get("COMMIT_SHA")  or ""
+RUN_ID           = os.environ.get("RUN_ID")      or ""
+TESTS_PASSED     = (os.environ.get("TESTS_PASSED") or "false").lower() == "true"
+FAILURE_SUMMARY  = os.environ.get("FAILURE_SUMMARY") or ""
+WEBHOOK_BASE_URL = (os.environ.get("WEBHOOK_BASE_URL") or "").rstrip("/")
+EMAIL_MODE       = os.environ.get("EMAIL_MODE")  or "bug_report"  # bug_report | ai_fix_success | ai_fix_failed
 
 
 def load_failed_tests() -> list[dict]:
