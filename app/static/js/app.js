@@ -33,17 +33,20 @@ async function doLogin() {
   const validationMsg = document.getElementById('validation-error');
   const successMsg = document.getElementById('success-message');
 
-  errorMsg.classList.remove('show');
-  validationMsg.classList.remove('show');
-  successMsg.classList.remove('show');
+  // Hide all alerts first
+  [errorMsg, validationMsg, successMsg].forEach(el => {
+    if (el) { el.style.display = 'none'; el.classList.remove('show'); }
+  });
 
   if (!username || !password) {
-    validationMsg.classList.add('show');
+    if (validationMsg) {
+      validationMsg.style.display = 'block';
+      validationMsg.classList.add('show');
+    }
     return;
   }
 
-  btn.classList.add('loading');
-  btn.disabled = true;
+  if (btn) { btn.classList.add('loading'); btn.disabled = true; }
 
   try {
     const form = new FormData();
@@ -54,20 +57,22 @@ async function doLogin() {
     const data = await res.json();
 
     if (res.ok && data.status === 'success') {
-      successMsg.classList.add('show');
-      setTimeout(() => {
-        window.location.href = data.redirect;
-      }, 800);
+      if (successMsg) { successMsg.style.display = 'block'; successMsg.classList.add('show'); }
+      setTimeout(() => { window.location.href = data.redirect; }, 800);
     } else {
-      errorMsg.classList.add('show');
-      btn.classList.remove('loading');
-      btn.disabled = false;
+      if (errorMsg) {
+        errorMsg.style.display = 'block';
+        errorMsg.classList.add('show');
+      }
+      if (btn) { btn.classList.remove('loading'); btn.disabled = false; }
     }
   } catch (err) {
     console.error('Login error:', err);
-    errorMsg.classList.add('show');
-    btn.classList.remove('loading');
-    btn.disabled = false;
+    if (errorMsg) {
+      errorMsg.style.display = 'block';
+      errorMsg.classList.add('show');
+    }
+    if (btn) { btn.classList.remove('loading'); btn.disabled = false; }
   }
 }
 

@@ -1,11 +1,11 @@
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort
 from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = "super-secret-key-change-in-production"
 
 USERS = {
-    "admin": "wrongpassword",
+    "admin": "password123",
     "user1": "user123",
 }
 
@@ -19,9 +19,13 @@ def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user" not in session:
-            return redirect(url_for("home"))
+            abort(403)
         return f(*args, **kwargs)
     return decorated
+
+@app.errorhandler(403)
+def forbidden(e):
+    return jsonify({"error": "Unauthorized", "status": 403}), 403
 
 @app.route("/")
 def home():
@@ -75,7 +79,6 @@ def get_item(item_id):
 def api_list_items():
     return jsonify({"items": ITEMS, "count": len(ITEMS)})
 
-# FIX: Use jsonify for proper JSON response
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'}), 200
