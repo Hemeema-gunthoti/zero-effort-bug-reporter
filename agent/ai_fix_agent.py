@@ -328,16 +328,17 @@ FAILURES:
 SOURCE FILES:
 """
         for path, content in source_files.items():
-            prompt += f"\n--- {path} ---\n{content[:2000]}\n"
+            prompt += f"\n--- {path} ---\n{content}\n"
 
         prompt += """
 RULES:
-1. MINIMAL changes only
-2. Preserve all functionality
+1. MINIMAL changes only — change as few lines as possible
+2. Preserve ALL existing routes, functions, and the exact app.run() configuration unless the fix specifically requires changing them
 3. Do NOT change file paths
-4. Return ONLY a single JSON object with file paths as keys and full file content as values
-5. Do NOT include markdown formatting, explanations, or multiple JSON objects
-6. Example format: {"app/main.py": "import flask..."}"""
+4. Do NOT remove any existing @app.route definitions
+5. Return ONLY a single JSON object with file paths as keys and full file content as values
+6. Do NOT include markdown formatting, explanations, or multiple JSON objects
+7. Example format: {"app/main.py": "import flask..."}"""
 
         try:
             response = self.client.chat.completions.create(
