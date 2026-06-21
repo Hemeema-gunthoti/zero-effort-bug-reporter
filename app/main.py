@@ -4,10 +4,9 @@ from functools import wraps
 app = Flask(__name__)
 app.secret_key = "super-secret-key-change-in-production"
 
-# BUG 1 (intentional): admin password is wrong.
-# test_valid_login_redirects_to_dashboard sends "password123" — this will fail → TimeoutException.
+# Fix: Update admin password to match test input
 USERS = {
-    "admin": "wrongpassword",
+    "admin": "password123",
     "user1": "user123",
 }
 
@@ -17,15 +16,19 @@ ITEMS = {
     "3": {"name": "Product C", "price": 9.99,  "stock": 300},
 }
 
-# BUG 2 (intentional): login_required redirects to / instead of returning 403.
-# test_dashboard_requires_auth expects "Unauthorized" or "403" in body — redirect returns login HTML.
+# Fix: Change login_required to use abort(403) instead of redirect
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user" not in session:
-            return redirect(url_for("home"))
+            abort(403)
         return f(*args, **kwargs)
     return decorated
+
+# Fix: Add error handler for 403
+@app.errorhandler(403)
+def forbidden(e):
+    return jsonify({"error": "Forbidden", "status": 403}), 403
 
 @app.route("/")
 def home():
