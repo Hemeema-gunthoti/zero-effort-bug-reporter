@@ -215,7 +215,7 @@ class AIFixAgent:
             })
         return failures
 
-        def _score_files_for_fixing(self, failures: List[Dict]) -> Dict[str, Dict]:
+    def _score_files_for_fixing(self, failures: List[Dict]) -> Dict[str, Dict]:
         files = {}
 
         source_paths = [
