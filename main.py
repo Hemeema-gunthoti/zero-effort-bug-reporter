@@ -59,12 +59,8 @@ print(f"📁 Cache file: {CACHE_FILE}")
 # ═══════════════════════════════════════════════════════════════════
 
 def _cache_key(test_name: str, error_type: str = None) -> str:
-    """
-    FIX: Include error_type in cache key for proper deduplication.
-    Different error types for the same test should create separate tickets.
-    """
     safe = test_name.lower()
-    for ch in " /\\\.:[]()":
+    for ch in " /\\\\\\.:[]()":
         safe = safe.replace(ch, "_")
     if error_type:
         error_safe = error_type.lower().replace(" ", "_")
@@ -214,7 +210,6 @@ async def process_failures():
     agent = FailureAnalysisAgent()
     results = []
     processed_this_run = {}
-    # FIX: Track all created ticket keys for export
     all_ticket_keys = []
 
     for i, metadata_path in enumerate(metadata_files, 1):
@@ -223,7 +218,6 @@ async def process_failures():
         print(f"{'=' * 60}")
 
         try:
-            # Read the artifact to show what we're working with
             print("\n📄 Artifact content:")
             with open(metadata_path, "r") as f:
                 artifact_data = json.load(f)
@@ -231,7 +225,6 @@ async def process_failures():
             print(f"   File: {artifact_data.get('file', 'N/A')}")
             print(f"   Summary: {artifact_data.get('failure_summary', 'N/A')[:100]}...")
 
-            # Analyze failure
             print("\n🔍 Running FailureAnalysisAgent...")
             agent_result = agent.analyze_failure(metadata_path)
 
@@ -254,7 +247,6 @@ async def process_failures():
             print(f"   Severity: {bug_report.get('severity', 'unknown')}")
             print(f"   Title: {bug_report.get('title', 'N/A')[:80]}...")
 
-            # FIX: Layer 1: Same-run dedup using BOTH test_name AND error_type
             dedup_key = (test_name, error_type)
             if dedup_key in processed_this_run:
                 existing_key = processed_this_run[dedup_key]
@@ -262,7 +254,6 @@ async def process_failures():
                 results.append({"test": test_name, "ticket": existing_key, "status": "skipped-same-run"})
                 continue
 
-            # FIX: Layer 2: Cache check with error_type
             if _is_cached(test_name, error_type):
                 cached_key = _get_cached_ticket(test_name, error_type)
                 if cached_key:
@@ -289,7 +280,6 @@ async def process_failures():
                     results.append({"test": test_name, "ticket": ticket_key, "status": status})
                     continue
 
-            # Layer 3: Create NEW Jira ticket
             print(f"\n🎫 Creating NEW Jira ticket...")
             print(f"   Project: {os.getenv('JIRA_PROJECT_KEY', 'NOT SET')}")
             print(f"   Base URL: {os.getenv('JIRA_BASE_URL', 'NOT SET')}")
@@ -355,27 +345,25 @@ async def process_failures():
 
     print(f"\n{'=' * 60}")
 
-    # FIX: Export ticket keys for workflow before cleanup
-    # This allows the GitHub Actions workflow to use the actual ticket key
+    # Export ALL ticket keys to GITHUB_ENV before cleanup
     unique_keys = list(dict.fromkeys(k for k in all_ticket_keys if k and k not in ("ERROR", "N/A", None)))
     if unique_keys:
         primary_key = unique_keys[0]
         print(f"\n🔑 Exporting JIRA_TICKET={primary_key}")
-        # Write to GitHub Actions env file if available
         github_env = os.getenv("GITHUB_ENV")
         if github_env:
             with open(github_env, "a") as f:
                 f.write(f"JIRA_TICKET={primary_key}\n")
-                # Also export all keys for reference
                 f.write(f"JIRA_TICKETS={','.join(unique_keys)}\n")
             print(f"   Written to GITHUB_ENV")
-        # Also set for current process
         os.environ["JIRA_TICKET"] = primary_key
         os.environ["JIRA_TICKETS"] = ",".join(unique_keys)
     else:
         print(f"\n⚠️ No valid ticket keys to export")
 
-    # FIX: Run AI Fix Agent BEFORE cleanup
+    # Run AI Fix Agent BEFORE cleanup — use propose_fix_batch so ALL bugs
+    # are fixed in one LLM call instead of one call per report (which caused
+    # the second call to overwrite the first's app/main.py in the manifest).
     if enable_ai_fix and AI_FIX_AVAILABLE:
         print(f"\n{'=' * 60}")
         print(f"🤖 AI FIX AGENT")
@@ -383,22 +371,23 @@ async def process_failures():
         print(f"{'=' * 60}")
         try:
             fix_agent = AIFixAgent()
-            # Read bug reports from bug_reports directory instead of raw artifacts
             bug_report_dir = os.path.join(ARTIFACT_DIR, "bug_reports")
             if os.path.exists(bug_report_dir):
                 bug_report_files = sorted(glob.glob(os.path.join(bug_report_dir, "bug_report_*.json")))
-                for br_path in bug_report_files:
-                    print(f"\n🔧 Processing fix for: {os.path.basename(br_path)}")
-                    fix_result = fix_agent.propose_fix(br_path, mode=fix_mode)
-                    print(f"   Result: {fix_result}")
+                if bug_report_files:
+                    print(f"\n🔧 Processing {len(bug_report_files)} bug report(s) as single batch")
+                    fix_result = fix_agent.propose_fix_batch(bug_report_files, mode=fix_mode)
+                    print(f"   Result: bugs_addressed={fix_result.get('bugs_addressed', '?')}, fixed={fix_result.get('fixed')}")
+                else:
+                    print("   No bug reports found for AI fix")
             else:
-                print("   No bug reports found for AI fix")
+                print("   No bug reports directory found")
         except Exception as e:
             print(f"   ❌ AI Fix Agent error: {e}")
             import traceback
             traceback.print_exc()
 
-    # FIX: Cleanup AFTER AI Fix Agent
+    # Cleanup AFTER AI Fix Agent
     print(f"\n🧹 Cleaning up {len(metadata_files)} artifact(s)...")
     for metadata_path in metadata_files:
         try:
@@ -409,7 +398,6 @@ async def process_failures():
 
     print("\n✅ Pipeline complete")
 
-    # FIX: Return results so caller can access ticket keys
     return results
 
 
