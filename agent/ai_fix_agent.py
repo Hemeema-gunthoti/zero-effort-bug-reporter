@@ -42,56 +42,74 @@ class AIFixAgent:
         "debug=False",
     ]
 
-    def propose_fix(self, bug_report_path: str, mode: str = "propose-only") -> Dict:
+    def propose_fix_batch(self, bug_report_paths: List[str], mode: str = "propose-only") -> Dict:
         """
-        Reads a bug report JSON and proposes a fix.
+        FIX: Process ALL bug reports in a single LLM call so every failing test
+        is addressed together and no fix overwrites another.
+
+        Previously, propose_fix() was called once per bug report, meaning two
+        separate LLM calls each produced their own app/main.py — the second
+        always clobbered the first in the manifest, so only one bug got fixed
+        in the PR.
         """
         print(f"\n{'='*60}")
-        print(f"🤖 AI FIX AGENT")
-        print(f" Input: {bug_report_path}")
+        print(f"🤖 AI FIX AGENT (BATCH)")
+        print(f" Reports: {len(bug_report_paths)}")
         print(f" Mode: {mode}")
         print(f"{'='*60}")
 
-        try:
-            with open(bug_report_path, 'r') as f:
-                bug_report = json.load(f)
-        except Exception as e:
-            print(f"❌ Failed to read bug report: {e}")
-            return {"fixed": False, "reason": f"read_error: {e}"}
+        # Load every bug report and build a unified failures list
+        all_failures = []
+        jira_ticket = None
+        bug_reports_data = []
 
-        metadata = bug_report.get("metadata", {})
-        test_name = metadata.get("test_name", "unknown")
-        error_type = metadata.get("error_type", "Unknown")
-        affected_component = metadata.get("affected_component", "unknown")
+        for br_path in bug_report_paths:
+            try:
+                with open(br_path, 'r') as f:
+                    bug_report = json.load(f)
+            except Exception as e:
+                print(f"❌ Failed to read {br_path}: {e}")
+                continue
 
-        jira_ticket = bug_report.get("ticket_key") or bug_report.get("jira_ticket")
-        if not jira_ticket:
-            jira_ticket = self._get_jira_ticket_from_cache_or_files()
+            bug_reports_data.append(bug_report)
+            metadata = bug_report.get("metadata", {})
+            test_name = metadata.get("test_name", "unknown")
+            error_type = metadata.get("error_type", "Unknown")
+            affected_component = metadata.get("affected_component", "unknown")
 
-        print(f"📋 Bug Report: {test_name}")
-        print(f"🔴 Error Type: {error_type}")
-        print(f"🏗️ Component: {affected_component}")
+            # Use the first valid jira ticket found across all reports
+            if not jira_ticket:
+                jira_ticket = bug_report.get("ticket_key") or bug_report.get("jira_ticket")
+            if not jira_ticket:
+                jira_ticket = self._get_jira_ticket_from_cache_or_files()
+
+            print(f"\n📋 Bug Report: {test_name}")
+            print(f"   🔴 Error: {error_type} | 🏗️ Component: {affected_component}")
+
+            # Normalize test_file from absolute CI path to repo-relative path
+            raw_test_file = (metadata.get("test_file") or "").replace("\\", "/")
+            if "tests/" in raw_test_file:
+                rel_test_file = "tests/" + raw_test_file.split("tests/")[-1]
+            else:
+                rel_test_file = raw_test_file
+
+            all_failures.append({
+                "test_name": test_name,
+                "test_file": rel_test_file,
+                "error_summary": bug_report.get("title", "") + " " + bug_report.get("description", ""),
+                "error_type": error_type.lower(),
+                "component": affected_component,
+                "description": bug_report.get("description", ""),
+            })
+
+        if not all_failures:
+            return {"fixed": False, "reason": "no_valid_bug_reports"}
+
         if jira_ticket:
-            print(f"🎫 Jira Ticket: {jira_ticket}")
+            print(f"\n🎫 Jira Ticket: {jira_ticket}")
 
-        # Normalize test_file from absolute CI path to repo-relative path.
-        # e.g. /home/runner/work/.../tests/test_login.py → tests/test_login.py
-        raw_test_file = (metadata.get("test_file") or "").replace("\\", "/")
-        if "tests/" in raw_test_file:
-            rel_test_file = "tests/" + raw_test_file.split("tests/")[-1]
-        else:
-            rel_test_file = raw_test_file
-
-        failures = [{
-            "test_name": test_name,
-            "test_file": rel_test_file,
-            "error_summary": bug_report.get("title", "") + " " + bug_report.get("description", ""),
-            "error_type": error_type.lower(),
-            "component": affected_component,
-            "description": bug_report.get("description", ""),
-        }]
-
-        file_scores = self._score_files_for_fixing(failures)
+        # Score files once across ALL failures combined
+        file_scores = self._score_files_for_fixing(all_failures)
         high_confidence = {k: v for k, v in file_scores.items() if v['score'] >= self.confidence_threshold}
 
         if not high_confidence:
@@ -109,12 +127,13 @@ class AIFixAgent:
                     "jira_ticket": jira_ticket,
                 }
 
-        print(f"📎 Scoring files for fixing...")
+        print(f"\n📎 Files selected for fixing (covering all {len(all_failures)} failure(s)):")
         for path, info in high_confidence.items():
             print(f"   {path}: score={info['score']:.2f} ({', '.join(info.get('reasons', []))})")
 
+        # Single LLM call with all failures at once
         source_files = {k: v['content'] for k, v in high_confidence.items()}
-        fixes = self._generate_fixes(failures, source_files, jira_ticket)
+        fixes = self._generate_fixes(all_failures, source_files, jira_ticket)
 
         if not fixes:
             return {
@@ -132,8 +151,16 @@ class AIFixAgent:
             "fixes": fixes,
             "diffs": diffs,
             "jira_ticket": jira_ticket,
+            "bugs_addressed": len(all_failures),
             "approval_required": mode == "propose-only",
         }
+
+    def propose_fix(self, bug_report_path: str, mode: str = "propose-only") -> Dict:
+        """
+        Single bug report path. Delegates to propose_fix_batch for consistency.
+        Kept for backward compatibility.
+        """
+        return self.propose_fix_batch([bug_report_path], mode=mode)
 
     def _get_jira_ticket_from_cache_or_files(self) -> Optional[str]:
         """Try to find jira ticket from various sources."""
@@ -251,9 +278,6 @@ class AIFixAgent:
         ]
 
         # Discover test files BEFORE the outer loop so they are read and scored.
-        # Previously this was inside the inner loop — paths got appended after
-        # the outer loop had already passed them, so the inner loop never ran
-        # for those paths, leaving component/test_file/etc. undefined → NameError.
         for failure in failures:
             raw_test_file = (failure.get("test_file") or "").replace("\\", "/")
             if "tests/" in raw_test_file:
@@ -274,28 +298,24 @@ class AIFixAgent:
             component_match = False
 
             for failure in failures:
-                # All variables initialized inside loop — never undefined.
                 component = failure.get("component", "")
                 test_file = failure.get("test_file", "")
                 error_type = (failure.get("error_type") or "").lower()
                 error_text = (failure.get("error_summary") or "").lower()
                 file_name = Path(path).name
 
-                # Component-based matching (strong signal)
                 if component and component.lower() in path.lower():
                     score += 0.4
                     reasons.append(f"component: {component}")
                     component_match = True
 
-                # Test file name matching
                 if test_file:
-                    test_stem = Path(test_file).stem           # e.g. "test_login"
-                    app_stem  = test_stem.replace("test_", "") # e.g. "login"
+                    test_stem = Path(test_file).stem
+                    app_stem  = test_stem.replace("test_", "")
                     if test_stem in path.lower() or app_stem in path.lower():
                         score += 0.3
                         reasons.append(f"test_file: {test_stem}")
 
-                # Error type matching
                 if error_type == "assertionerror" and any(x in path.lower() for x in ["main.py", "routes.py", "views.py", "auth.py"]):
                     score += 0.2
                     reasons.append("assertionerror → backend")
@@ -305,28 +325,23 @@ class AIFixAgent:
                         score += 0.25
                         reasons.append("timeout → backend")
 
-                # File name mentioned in error text
                 if file_name and file_name in error_text:
                     score += 0.3
                     reasons.append(f"mentioned: {file_name}")
 
-                # Login-related errors → login files
                 if "login" in error_text and "login" in path.lower():
                     score += 0.25
                     reasons.append("login context")
 
-                # Dashboard-related errors → dashboard files
                 if "dashboard" in error_text and "dashboard" in path.lower():
                     score += 0.25
                     reasons.append("dashboard context")
 
-                # Unauthorized/403 errors → auth files
                 if any(x in error_text for x in ["unauthorized", "403", "auth", "login required"]):
                     if any(x in path.lower() for x in ["auth", "login", "main.py", "routes"]):
                         score += 0.3
                         reasons.append("auth context")
 
-                # KeyError handling
                 if "keyerror" in error_text and "main.py" in path:
                     score += 0.3
                     reasons.append("KeyError → backend")
@@ -350,9 +365,9 @@ class AIFixAgent:
 
         ticket_ref = f"\nRelated Jira Ticket: {jira_ticket}" if jira_ticket else ""
 
-        prompt = f"""You are an expert code reviewer. Fix these test failures.{ticket_ref}
+        prompt = f"""You are an expert code reviewer. Fix ALL of these test failures in one pass.{ticket_ref}
 
-FAILURES:
+FAILURES ({len(failures)} total — fix ALL of them):
 {failure_context}
 
 SOURCE FILES:
@@ -362,18 +377,19 @@ SOURCE FILES:
 
         prompt += """
 RULES:
-1. MINIMAL changes only — change as few lines as possible.
-2. app/main.py HARD CONSTRAINTS — you MUST preserve ALL of the following exactly, no exceptions:
+1. Fix ALL failures listed above — do not skip any.
+2. MINIMAL changes only — change as few lines as possible.
+3. app/main.py HARD CONSTRAINTS — you MUST preserve ALL of the following exactly, no exceptions:
    - The @app.route('/health') route that returns jsonify({'status': 'ok'}), 200
    - app.run(host="0.0.0.0", port=5000, debug=False) — do NOT change host, port, or debug value
    - Every existing @app.route definition — do NOT remove or rename any route
    - The USERS and ITEMS dicts (only change a value if the fix specifically requires it)
-3. Do NOT change file paths.
-4. Do NOT remove any existing @app.route definitions from any file.
-5. Return ONLY a single JSON object with file paths as keys and complete file content as values.
-6. Do NOT include markdown formatting, explanations, or multiple JSON objects.
-7. Example format: {"app/main.py": "from flask import Flask..."}
-8. Decide WHERE the actual bug is before fixing. If a test file is included above:
+4. Do NOT change file paths.
+5. Do NOT remove any existing @app.route definitions from any file.
+6. Return ONLY a single JSON object with file paths as keys and complete file content as values.
+7. Do NOT include markdown formatting, explanations, or multiple JSON objects.
+8. Example format: {"app/main.py": "from flask import Flask..."}
+9. Decide WHERE each bug is before fixing. If a test file is included above:
    - If the test's expected input/output doesn't match constants already defined
      in the application code (e.g. a hardcoded username/password dict), and the
      test's own docstring/class name implies it should represent a VALID/working
@@ -383,11 +399,11 @@ RULES:
    - If the application returns the wrong status code, wrong response shape, or
      incorrect business logic relative to what the test (correctly) expects,
      fix the application file instead.
-9. NEVER weaken, remove, or loosen a test assertion to make it pass artificially.
-   You may only correct factual test input (e.g. a typo'd credential, a wrong
-   expected value that contradicts the app's own documented behavior). Do not
-   change what a test checks for — only correct what's clearly wrong input/data.
-10. If unsure whether to fix the app or the test, prefer fixing the application
+10. NEVER weaken, remove, or loosen a test assertion to make it pass artificially.
+    You may only correct factual test input (e.g. a typo'd credential, a wrong
+    expected value that contradicts the app's own documented behavior). Do not
+    change what a test checks for — only correct what's clearly wrong input/data.
+11. If unsure whether to fix the app or the test, prefer fixing the application
     file — only fix a test file when the evidence that the test itself is wrong
     is unambiguous."""
 
@@ -421,13 +437,11 @@ RULES:
         Robust JSON extraction from LLM response.
         Handles markdown, multiple JSON objects, extra text, etc.
         """
-        # Remove markdown code blocks
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw).strip()
 
         best_fixes = {}
 
-        # Strategy 1: Try parsing the whole thing first
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
@@ -435,7 +449,6 @@ RULES:
         except json.JSONDecodeError:
             pass
 
-        # Strategy 2: Find all JSON-like objects using brace matching
         depth = 0
         start = -1
         for i, char in enumerate(raw):
@@ -462,7 +475,6 @@ RULES:
         if best_fixes:
             return best_fixes
 
-        # Strategy 3: Try to fix common JSON issues and retry
         fixed_raw = raw
         fixed_raw = re.sub(r',\s*}', '}', fixed_raw)
         fixed_raw = re.sub(r',\s*]', ']', fixed_raw)
@@ -475,7 +487,6 @@ RULES:
         except json.JSONDecodeError:
             pass
 
-        # Strategy 4: Try first { to last }
         first_brace = raw.find('{')
         last_brace = raw.rfind('}')
         if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
@@ -490,10 +501,9 @@ RULES:
 
     def _validate_fixes(self, parsed: Dict, source_files: Dict[str, str]) -> Dict[str, str]:
         """
-        Validate that parsed fixes are for known source files and have reasonable content.
-        For app/main.py specifically, enforce that critical strings are present —
-        the LLM tends to replace it with a minimal stub that drops /health and
-        changes app.run() config, breaking the CI health check.
+        Validate fixes. For app/main.py enforce critical strings are present —
+        the LLM tends to replace it with a stub that drops /health and changes
+        app.run() config, breaking the CI health check.
         """
         validated = {}
         for path, content in parsed.items():
@@ -505,8 +515,6 @@ RULES:
                 print(f"⚠️ Skipping {path} — content too short ({len(content)} chars), likely a stub")
                 continue
 
-            # Hard guard for app/main.py: reject any version that drops
-            # the /health route or changes the app.run() binding.
             if path == "app/main.py":
                 missing = [req for req in self.MAIN_PY_REQUIRED if req not in content]
                 if missing:
@@ -514,9 +522,9 @@ RULES:
                     for m in missing:
                         print(f"   • {m!r}")
                     print(f"   Falling back to original app/main.py to avoid breaking Flask startup.")
-                    # Keep the original so it still appears in the PR diff correctly
-                    if path in source_files:
-                        validated[path] = source_files[path]
+                    # Do NOT include main.py at all — let it stay as-is on disk.
+                    # (Including original content here would create a no-op diff
+                    #  and still block fixes to other files from landing in the PR.)
                     continue
 
             validated[path] = content
@@ -547,11 +555,6 @@ RULES:
             (AI_FIX_DIR / fix_filename).write_text(content)
             manifest[path] = fix_filename
 
-        # manifest maps original repo path -> generated fix filename, so
-        # the workflow doesn't have to reverse-engineer the path from the
-        # filename. That reversal breaks for paths like tests/test_login.py,
-        # since a blind "_" -> "/" swap would wrongly split "test_login.py"
-        # into "test/login.py".
         manifest_path = AI_FIX_DIR / "fix_manifest.json"
         existing_manifest = {}
         if manifest_path.exists():

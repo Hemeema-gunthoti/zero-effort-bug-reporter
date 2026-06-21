@@ -376,20 +376,24 @@ jobs:
 
           agent = AIFixAgent()
           bug_report_files = sorted(glob.glob('artifacts/bug_reports/bug_report_*.json'))
-          print(f'Found {len(bug_report_files)} bug reports to analyze')
+          print(f'Found {len(bug_report_files)} bug reports — processing as single batch')
 
           fix_applied = False
-          for br_path in bug_report_files:
-              print(f'Processing: {os.path.basename(br_path)}')
+          if bug_report_files:
               try:
-                  result = agent.propose_fix(br_path, mode='propose-only')
-                  print(f'Result: {result}')
+                  # FIX: Single batch call so ALL bugs are fixed in one LLM pass.
+                  # Previously called propose_fix() once per file — each call
+                  # produced its own app/main.py fix and the second overwrote
+                  # the first in the manifest, leaving only one bug addressed.
+                  result = agent.propose_fix_batch(bug_report_files, mode='propose-only')
+                  print(f'Batch result: bugs_addressed={result.get(\"bugs_addressed\", \"?\")}, fixed={result.get(\"fixed\")}')
                   if result.get('fixed'):
                       fix_applied = True
               except Exception as e:
-                  print(f'Error processing {br_path}: {e}')
+                  print(f'Error in batch fix: {e}')
+                  import traceback
+                  traceback.print_exc()
 
-          # Create marker file if any fix was proposed
           if fix_applied:
               os.makedirs('artifacts/ai_fixes', exist_ok=True)
               with open('artifacts/ai_fixes/fix_applied.txt', 'w') as f:

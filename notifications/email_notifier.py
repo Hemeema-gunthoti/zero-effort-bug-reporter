@@ -36,7 +36,6 @@ def notify_email(bug_report: dict, jira_result: dict) -> dict:
     status     = jira_result.get("status", "unknown")
     ticket_key = jira_result.get("ticket_key", "N/A")
     ticket_url = jira_result.get("ticket_url", "")
-    #assignee   = bug_report.get("assignee", "")
     to_email   = SMTP_USERNAME
 
     try:
@@ -280,46 +279,141 @@ def _is_configured() -> bool:
     return bool(SMTP_USERNAME and SMTP_PASSWORD)
 
 
-def send_ai_fix_proposal_email(pr_url: str, run_number: str, to_email: str) -> bool:
-    """Send email when AI fix is proposed and needs human approval."""
+def send_ai_fix_proposal_email(
+    pr_url: str,
+    run_number: str,
+    to_email: str,
+    bug_reports: list = None,       # FIX: accept list of bug report dicts for detailed body
+    pr_branch: str = None,          # FIX: explicit branch name for the email
+) -> bool:
+    """Send email when AI fix is proposed and needs human approval.
+    
+    Now includes:
+    - Full bug report table (one row per failing test) so reviewer knows what broke
+    - Explicit PR branch name
+    - All bugs addressed, not just the first one
+    """
     try:
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-        import smtplib
-        import os
-
         msg = MIMEMultipart('alternative')
         msg['Subject'] = f'🤖 AI Fix Proposal - Run #{run_number} - Approval Required'
         msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
         msg['To'] = to_email
 
+        # Build per-bug detail rows
+        bug_rows_html = ""
+        if bug_reports:
+            for idx, br in enumerate(bug_reports, 1):
+                meta      = br.get("metadata", {})
+                title     = br.get("title", "Unknown")
+                severity  = br.get("severity", "Unknown")
+                priority  = br.get("priority", "Unknown")
+                test_name = meta.get("test_name", "Unknown")
+                component = meta.get("affected_component", "Unknown")
+                error_type = meta.get("error_type", "Unknown")
+                # Pull plain-text root cause from description if available
+                description = br.get("description", "")
+                # Strip Jira markup for the email — grab the Summary section
+                root_cause = ""
+                if "h3. Summary" in description:
+                    after = description.split("h3. Summary")[-1]
+                    root_cause = after.split("\n\nh3.")[0].strip()[:200]
+                if not root_cause:
+                    root_cause = title[:150]
+
+                bug_rows_html += f"""
+        <tr style="background: {'#fff' if idx % 2 == 0 else '#f9fafb'};">
+          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px;">
+            <strong>Bug #{idx}</strong><br>
+            <code style="font-size:11px; color:#374151;">{test_name}</code>
+          </td>
+          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px;">{component}</td>
+          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px;">{error_type}</td>
+          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:13px;">
+            <span style="display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600;
+              background:{'#fee2e2' if severity=='Critical' else '#fef3c7' if severity=='High' else '#dbeafe'};
+              color:{'#dc2626' if severity=='Critical' else '#d97706' if severity=='High' else '#2563eb'};">
+              {severity}
+            </span>
+          </td>
+          <td style="padding:10px 12px; border-bottom:1px solid #e5e7eb; font-size:12px; color:#6b7280;">{root_cause}</td>
+        </tr>"""
+        else:
+            bug_rows_html = """
+        <tr>
+          <td colspan="5" style="padding:12px; text-align:center; color:#9ca3af; font-size:13px;">
+            No bug report details available
+          </td>
+        </tr>"""
+
+        # PR branch display
+        branch_display = pr_branch or f"ai-fix-{run_number}"
+
         html = f'''
         <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-                <h2 style="color: #4f46e5;">🤖 AI Fix Proposal</h2>
-                <p>The AI Fix Agent has analyzed the failing tests and proposed code changes.</p>
-                
-                <div style="background: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
-                    <h3 style="margin-top: 0; color: #92400e;">⏳ Human Approval Required</h3>
-                    <p><strong>Pull Request:</strong> <a href="{pr_url}" style="color: #4f46e5;">{pr_url}</a></p>
-                    <p><strong>Run Number:</strong> #{run_number}</p>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; background:#f5f5f5; margin:0; padding:20px;">
+            <div style="max-width: 680px; margin: 0 auto; background:#fff; border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+
+              <div style="background:#4f46e5; color:#fff; padding:24px 32px;">
+                <h2 style="margin:0; font-size:20px;">🤖 AI Fix Proposal</h2>
+                <p style="margin:6px 0 0; opacity:0.9; font-size:14px;">Zero-Effort Bug Reporter — Automated Fix</p>
+              </div>
+
+              <div style="padding:24px 32px;">
+
+                <div style="background:#fef3c7; padding:16px 20px; border-radius:8px; margin-bottom:20px; border-left:4px solid #f59e0b;">
+                  <h3 style="margin-top:0; color:#92400e;">⏳ Human Approval Required</h3>
+                  <table style="width:100%; border-collapse:collapse;">
+                    <tr>
+                      <td style="padding:4px 0; font-size:14px; color:#374151; width:120px;"><strong>Run:</strong></td>
+                      <td style="padding:4px 0; font-size:14px;">#{run_number}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:4px 0; font-size:14px; color:#374151;"><strong>Branch:</strong></td>
+                      <td style="padding:4px 0; font-size:14px;"><code style="background:#f3f4f6; padding:2px 6px; border-radius:4px;">{branch_display}</code></td>
+                    </tr>
+                    <tr>
+                      <td style="padding:4px 0; font-size:14px; color:#374151;"><strong>Pull Request:</strong></td>
+                      <td style="padding:4px 0; font-size:14px;">
+                        <a href="{pr_url}" style="color:#4f46e5; word-break:break-all;">{pr_url}</a>
+                      </td>
+                    </tr>
+                  </table>
                 </div>
 
-                <h3 style="color: #374151;">How to Approve:</h3>
-                <ol style="padding-left: 20px;">
-                    <li>Review the code changes in the PR</li>
-                    <li>Go to <strong>Actions</strong> tab in your repo</li>
-                    <li>Select <strong>CI/CD — Test-First Gated Deploy</strong></li>
-                    <li>Click <strong>Run workflow</strong></li>
-                    <li>Select <strong>approve-ai-fix</strong></li>
+                <h3 style="color:#374151; margin-bottom:8px;">🐛 Bugs Detected &amp; Addressed</h3>
+                <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
+                  <thead>
+                    <tr style="background:#f9fafb;">
+                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Test</th>
+                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Component</th>
+                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Error Type</th>
+                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Severity</th>
+                      <th style="padding:10px 12px; text-align:left; font-size:11px; color:#6b7280; text-transform:uppercase; border-bottom:2px solid #e5e7eb;">Root Cause</th>
+                    </tr>
+                  </thead>
+                  <tbody>{bug_rows_html}</tbody>
+                </table>
+
+                <h3 style="color:#374151;">How to Approve:</h3>
+                <ol style="padding-left:20px; font-size:14px;">
+                  <li>Review the code changes in the PR (link above)</li>
+                  <li>Go to <strong>Actions</strong> tab in your repo</li>
+                  <li>Select <strong>CI/CD — Test-First Gated Deploy</strong></li>
+                  <li>Click <strong>Run workflow</strong></li>
+                  <li>Select <strong>approve-ai-fix</strong></li>
                 </ol>
 
-                <h3 style="color: #374151;">How to Reject:</h3>
-                <ol style="padding-left: 20px;">
-                    <li>Same steps, but select <strong>reject-ai-fix</strong></li>
-                    <li>Jira ticket will remain open for manual fix</li>
+                <h3 style="color:#374151;">How to Reject:</h3>
+                <ol style="padding-left:20px; font-size:14px;">
+                  <li>Same steps, but select <strong>reject-ai-fix</strong></li>
+                  <li>Jira ticket(s) will remain open for manual fix</li>
                 </ol>
+
+              </div>
+
+              <div style="padding:16px 32px; background:#f9fafb; border-top:1px solid #e5e7eb; font-size:12px; color:#9ca3af; text-align:center;">
+                Generated automatically by Zero-Effort Bug Reporter • {datetime.now().strftime('%Y-%m-%d %H:%M')}
+              </div>
             </div>
         </body>
         </html>
@@ -327,9 +421,14 @@ def send_ai_fix_proposal_email(pr_url: str, run_number: str, to_email: str) -> b
 
         msg.attach(MIMEText(html, 'html'))
 
-        with smtplib.SMTP(os.getenv('SMTP_SERVER', 'smtp.gmail.com'), int(os.getenv('SMTP_PORT', '587'))) as server:
+        smtp_server = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+        smtp_port   = int(os.getenv('SMTP_PORT', '587'))
+        username    = os.getenv('SMTP_USERNAME')
+        password    = os.getenv('SMTP_PASSWORD')
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
-            server.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
+            server.login(username, password)
             server.send_message(msg)
 
         print(f"📧 AI fix proposal email sent to {to_email}")
@@ -342,10 +441,6 @@ def send_ai_fix_proposal_email(pr_url: str, run_number: str, to_email: str) -> b
 def send_ai_fix_resolved_email(ticket_key: str, to_email: str) -> bool:
     """Send email when AI fix is approved, merged, and deployed."""
     try:
-        import smtplib
-        from email.mime.text import MIMEText
-        import os
-
         msg = MIMEText(f'''
 ✅ Bug Resolved — AI Fix Deployed
 
@@ -376,11 +471,6 @@ No further action required.
 def send_manual_fix_required_email(ticket_key: str, jira_url: str, to_email: str) -> bool:
     """Send email when AI cannot fix and manual intervention is needed."""
     try:
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-        import os
-
         msg = MIMEMultipart('alternative')
         msg['Subject'] = f'🔧 Manual Fix Required — {ticket_key}'
         msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
