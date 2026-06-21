@@ -23,8 +23,8 @@ class TestLoginHappyPath:
     def test_valid_login_redirects_to_dashboard(self, driver):
         """Valid credentials should redirect the browser to /dashboard."""
         driver.get(BASE_URL)
-        driver.find_element(By.ID, "username").send_keys("user1")
-        driver.find_element(By.ID, "password").send_keys("user123")
+        driver.find_element(By.ID, "username").send_keys("admin")
+        driver.find_element(By.ID, "password").send_keys("admin")
         driver.find_element(By.ID, "login-btn").click()
 
         try:
