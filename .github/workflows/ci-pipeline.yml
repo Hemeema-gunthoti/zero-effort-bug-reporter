@@ -74,9 +74,11 @@ jobs:
       - name: Prepare directories
         run: mkdir -p artifacts/{screenshots,stacktraces,logs,bug_reports,ai_fixes}
 
+      # FIX: Removed the foreground `timeout 3 python app/main.py` throwaway run
+      # (it was leaving orphaned processes holding port 5000) and added a
+      # synchronous import check + unbuffered single real launch instead.
       - name: Start Flask app
         run: |
-          # Debug: Check everything
           echo "=== Python version ==="
           python --version
 
@@ -89,11 +91,19 @@ jobs:
           echo "=== Check requirements ==="
           pip list | grep -i flask
 
-          echo "=== Try running in foreground for 3 seconds ==="
-          timeout 3 python app/main.py 2>&1 || echo "Exit code: $?"
+          echo "=== Ensure port 5000 is free before starting ==="
+          fuser -k 5000/tcp 2>/dev/null || true
+          pkill -f "python.*app/main.py" 2>/dev/null || true
+          sleep 1
 
-          echo "=== Try with explicit python3 ==="
-          python3 app/main.py > flask.log 2>&1 &
+          echo "=== Syntax check ==="
+          python -m py_compile app/main.py && echo "✅ No syntax errors" || echo "❌ Syntax error"
+
+          echo "=== Import check (synchronous, shows full traceback if it fails) ==="
+          python -c "import sys; sys.path.insert(0,'.'); sys.path.insert(0,'app'); import main" 2>&1 || echo "❌ Import of app/main.py failed — see traceback above"
+
+          echo "=== Start Flask (real launch, unbuffered output) ==="
+          python -u app/main.py > flask.log 2>&1 &
           echo "FLASK_PID=$!" >> $GITHUB_ENV
           sleep 5
 
@@ -605,7 +615,6 @@ jobs:
       # (python app/main.py), not `flask run`, for consistency.
       # -u disables stdout/stderr buffering so crashes are captured
       # in flask.log even if the process dies almost immediately.
-      # nohup detaches the process so it survives the step's shell exiting.
       - name: Start Flask app
         run: |
           echo "=== Python version ==="
@@ -627,7 +636,8 @@ jobs:
 
           echo "=== Start Flask (single real launch, no foreground throwaway run) ==="
           python -u app/main.py > flask.log 2>&1 &
-          echo "FLASK_PID=$!" >> $GITHUB_ENV
+          echo $! > flask.pid
+          echo "FLASK_PID=$(cat flask.pid)" >> $GITHUB_ENV
           sleep 5
 
           echo "=== Check process ==="
