@@ -35,9 +35,6 @@ jobs:
     name: 🔨 Build & Test
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Skip this job when the AI Fix Bot merges — deploy-after-ai-fix
-    # already tested the branch before merging, so re-running tests is
-    # redundant and would re-trigger the bug reporter on clean code.
     if: |
       github.event_name == 'push' &&
       github.event.head_commit.author.name != 'AI Fix Bot'
@@ -322,7 +319,8 @@ jobs:
 
           echo "ticket_key=$TICKET" >> $GITHUB_OUTPUT
           echo "ticket_keys=$TICKETS" >> $GITHUB_OUTPUT
-          echo "🎫 Jira ticket(s): $TICKETS"
+          echo "🎫 Primary ticket: $TICKET"
+          echo "🎫 All tickets: $TICKETS"
 
       - name: Upload Bug Reports
         if: always()
@@ -423,21 +421,35 @@ jobs:
           Review carefully — confirm it only corrects factual input, not loosened assertions."
           fi
 
+          # Build ticket display — all tickets comma-separated
+          TICKET_DISPLAY="${{ steps.bug_report.outputs.ticket_keys }}"
+          if [ -z "$TICKET_DISPLAY" ]; then
+            TICKET_DISPLAY="${{ steps.bug_report.outputs.ticket_key }}"
+          fi
+
+          # Build Jira links for PR body — one link per ticket
+          TICKET_LINKS=""
+          IFS=',' read -ra TKEYS <<< "$TICKET_DISPLAY"
+          for TK in "${TKEYS[@]}"; do
+            TK=$(echo "$TK" | xargs)
+            TICKET_LINKS="$TICKET_LINKS [$TK](${{ secrets.JIRA_BASE_URL }}/browse/$TK)"
+          done
+
           git commit -m "🤖 AI Fix Proposal [RUN-${{ github.run_id }}]
 
           Fixes for failing tests. Awaiting human approval.
-          Jira Ticket: ${{ steps.bug_report.outputs.ticket_key }}"
+          Jira Tickets: $TICKET_DISPLAY"
 
           git push origin "$BRANCH" || { sleep 2; git push origin "$BRANCH"; }
 
           PR_URL=$(gh pr create \
             --repo ${{ github.repository }} \
-            --title "🤖 AI Fix: Run #${{ github.run_id }} | Ticket: ${{ steps.bug_report.outputs.ticket_key }}" \
+            --title "🤖 AI Fix: Run #${{ github.run_id }} | Tickets: $TICKET_DISPLAY" \
             --body "## AI-Generated Fix Proposal
 
           | Field | Value |
           |-------|-------|
-          | **Jira Ticket** | ${{ steps.bug_report.outputs.ticket_key }} |
+          | **Jira Tickets** | $TICKET_LINKS |
           | **Run** | #${{ github.run_id }} |
           | **Status** | ⏳ Awaiting Human Approval |
           $REVIEW_NOTE
@@ -470,6 +482,9 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SMTP_SERVER: smtp.gmail.com
           SMTP_PORT: "587"
+          TICKET_KEYS: ${{ steps.bug_report.outputs.ticket_keys }}
+          TICKET_KEY: ${{ steps.bug_report.outputs.ticket_key }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
         run: |
           python -c "
           import os, sys, glob, json
@@ -487,8 +502,20 @@ jobs:
           run_number = os.getenv('RUN_NUMBER', 'unknown')
           pr_url     = os.getenv('PR_URL', 'N/A')
           pr_branch  = os.getenv('PR_BRANCH', f'ai-fix-{run_number}')
-          to_email   = os.getenv('TO_EMAIL')
+          to_email   = os.getenv('TO_EMAIL') or os.getenv('SMTP_USERNAME')
           repo       = os.getenv('GITHUB_REPOSITORY', '')
+          jira_base  = os.getenv('JIRA_BASE_URL', '')
+
+          # All ticket keys — use TICKET_KEYS (comma-separated) if available
+          ticket_keys_raw = os.getenv('TICKET_KEYS', '') or os.getenv('TICKET_KEY', '')
+          all_tickets = [t.strip() for t in ticket_keys_raw.split(',') if t.strip()]
+          print(f'Tickets to reference in email: {all_tickets}')
+
+          # Inject ticket URL into each bug report for the email template
+          for i, br in enumerate(bug_reports):
+              if i < len(all_tickets):
+                  br['_ticket_key'] = all_tickets[i]
+                  br['_ticket_url'] = f'{jira_base}/browse/{all_tickets[i]}'
 
           print(f'Sending approval email for {len(bug_reports)} bug(s) to {to_email}')
           send_ai_fix_proposal_email(
@@ -501,20 +528,28 @@ jobs:
           )
           "
 
+      # ── Update ALL Jira tickets if AI could not fix ──────────────
       - name: Update Jira — AI could not fix (no PR created)
         if: steps.ai_fix.outputs.fix_created == 'false' && steps.bug_report.outputs.ticket_key != '' && steps.bug_report.outputs.ticket_key != 'UNKNOWN'
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          TICKET: ${{ steps.bug_report.outputs.ticket_key }}
+          TICKET_KEYS: ${{ steps.bug_report.outputs.ticket_keys }}
+          TICKET_KEY: ${{ steps.bug_report.outputs.ticket_key }}
         run: |
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"body":"🤖 AI Fix Agent could not generate an automatic fix. Manual developer intervention required."}' \
-            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
-          echo "📝 Jira updated: Manual fix needed"
+          ALL_TICKETS="${TICKET_KEYS:-$TICKET_KEY}"
+          IFS=',' read -ra TKEYS <<< "$ALL_TICKETS"
+          for TICKET in "${TKEYS[@]}"; do
+            TICKET=$(echo "$TICKET" | xargs)
+            echo "📝 Commenting on $TICKET..."
+            curl -s -X POST \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"body":"🤖 AI Fix Agent could not generate an automatic fix. Manual developer intervention required."}' \
+              "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
+          done
+          echo "📝 Jira updated on all tickets: Manual fix needed"
 
       - name: No valid ticket warning
         if: steps.bug_report.outputs.ticket_key == '' || steps.bug_report.outputs.ticket_key == 'UNKNOWN'
@@ -537,6 +572,7 @@ jobs:
     outputs:
       tests_passed: ${{ steps.test_fix.outputs.passed }}
       ticket: ${{ steps.merge.outputs.ticket }}
+      all_tickets: ${{ steps.merge.outputs.all_tickets }}
 
     services:
       redis:
@@ -649,7 +685,7 @@ jobs:
         if: always()
         run: kill "$(cat flask.pid 2>/dev/null)" 2>/dev/null || true
 
-      # ── All tests pass → merge ────────────────────────────────────
+      # ── All tests pass → merge and resolve ALL Jira tickets ──────
       - name: Merge AI fix into main
         id: merge
         if: steps.test_fix.outputs.passed == 'true'
@@ -661,11 +697,14 @@ jobs:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
         run: |
           PR_BODY=$(gh pr view ${{ steps.find_pr.outputs.pr }} --repo ${{ github.repository }} --json body --jq '.body')
-          TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-          echo "ticket=$TICKET" >> $GITHUB_OUTPUT
 
-          # Merge using AI Fix Bot identity so the post-merge push is
-          # recognised by build-and-test's skip condition and not re-processed
+          # Extract ALL ticket keys from PR body (e.g. ZEB-107, ZEB-108)
+          ALL_TICKETS=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
+          PRIMARY_TICKET=$(echo "$ALL_TICKETS" | cut -d',' -f1)
+          echo "ticket=$PRIMARY_TICKET" >> $GITHUB_OUTPUT
+          echo "all_tickets=$ALL_TICKETS" >> $GITHUB_OUTPUT
+          echo "🎫 Tickets to resolve: $ALL_TICKETS"
+
           git config user.name "AI Fix Bot"
           git config user.email "ai-fix@bot.com"
 
@@ -676,21 +715,19 @@ jobs:
             --subject "🤖 AI Fix merged [RUN-${{ github.run_id }}]"
           echo "✅ AI fix merged into main"
 
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"body":"✅ RESOLVED by AI Fix Agent. Fix approved, all tests passed, merged to main. Deploying to production."}' \
-            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
+          # Comment on ALL tickets — resolution happens after production deploy
+          IFS=',' read -ra TKEYS <<< "$ALL_TICKETS"
+          for TK in "${TKEYS[@]}"; do
+            TK=$(echo "$TK" | xargs)
+            echo "   Commenting on $TK (merged — awaiting deploy)..."
+            curl -s -X POST \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"body":"✅ AI Fix merged to main. Deploying to production now — ticket will be closed on successful deploy."}' \
+              "$JIRA_BASE_URL/rest/api/2/issue/$TK/comment" || true
+          done
 
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"transition":{"id":"31"}}' \
-            "$JIRA_BASE_URL/rest/api/3/issue/$TICKET/transitions" || true
-
-          echo "🎫 Jira ticket $TICKET marked as resolved"
-
-      # ── Tests still failing → leave PR open, notify ───────────────
+      # ── Tests still failing → leave PR open, notify ALL tickets ──
       - name: Notify — tests still failing, PR stays open
         if: steps.test_fix.outputs.passed == 'false'
         env:
@@ -708,22 +745,25 @@ jobs:
         run: |
           PR_NUM=${{ steps.find_pr.outputs.pr }}
           PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
-          TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+          ALL_TICKETS=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
 
           gh pr comment $PR_NUM --repo ${{ github.repository }} \
             --body "❌ Approved but **${FAILED_COUNT} test(s) still failing**. PR stays open for manual revision."
 
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"body\":\"❌ AI fix approved but ${FAILED_COUNT} test(s) still failing. PR #${PR_NUM} needs manual revision.\"}" \
-            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
+          IFS=',' read -ra TKEYS <<< "$ALL_TICKETS"
+          for TK in "${TKEYS[@]}"; do
+            TK=$(echo "$TK" | xargs)
+            curl -s -X POST \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"body\":\"❌ AI fix approved but ${FAILED_COUNT} test(s) still failing on fix branch. PR #${PR_NUM} needs manual revision.\"}" \
+              "$JIRA_BASE_URL/rest/api/2/issue/$TK/comment" || true
+          done
 
           python3 -c "
           import os, smtplib
           from email.mime.multipart import MIMEMultipart
           from email.mime.text import MIMEText
-
           failed_count = os.getenv('FAILED_COUNT', '?')
           msg = MIMEMultipart('alternative')
           msg['Subject'] = '⚠️ AI Fix: Tests Still Failing — Manual Revision Needed'
@@ -744,8 +784,8 @@ jobs:
 
   # ═════════════════════════════════════════════════════════════════
   # JOB 4: DEPLOY AFTER AI FIX MERGE
-  # Runs only when approve-ai-fix succeeded (all tests passed + merged).
-  # This is the production deploy path for the AI fix flow.
+  # Runs only when approve-ai-fix succeeded.
+  # Closes ALL Jira tickets only after production is confirmed healthy.
   # ═════════════════════════════════════════════════════════════════
   deploy-staging-after-ai-fix:
     name: 🚀 Deploy Staging (post AI fix)
@@ -782,7 +822,7 @@ jobs:
 
   deploy-production-after-ai-fix:
     name: 🌐 Promote to Production (post AI fix)
-    needs: deploy-staging-after-ai-fix
+    needs: [deploy-staging-after-ai-fix, approve-ai-fix]
     if: needs.deploy-staging-after-ai-fix.outputs.deploy_status == 'success'
     runs-on: ubuntu-latest
 
@@ -802,12 +842,40 @@ jobs:
           done
           echo "❌ Production health check failed" && exit 1
 
+      # Close ALL Jira tickets only after production is confirmed healthy
+      - name: Close all Jira tickets — production confirmed healthy
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          ALL_TICKETS: ${{ needs.approve-ai-fix.outputs.all_tickets }}
+        run: |
+          echo "🎫 Closing tickets: $ALL_TICKETS"
+          IFS=',' read -ra TKEYS <<< "$ALL_TICKETS"
+          for TK in "${TKEYS[@]}"; do
+            TK=$(echo "$TK" | xargs)
+            echo "   Closing $TK..."
+            # Add resolved comment
+            curl -s -X POST \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"body":"✅ RESOLVED — AI fix deployed to production and confirmed healthy. Closing ticket."}' \
+              "$JIRA_BASE_URL/rest/api/2/issue/$TK/comment" || true
+            # Transition to Done/Resolved (id 31 = Done in most Jira configs)
+            curl -s -X POST \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"transition":{"id":"31"}}' \
+              "$JIRA_BASE_URL/rest/api/3/issue/$TK/transitions" || true
+          done
+          echo "✅ All tickets closed: $ALL_TICKETS"
+
       - name: Notify production deploy success
         env:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
-          TICKET: ${{ needs.approve-ai-fix.outputs.ticket }}
+          ALL_TICKETS: ${{ needs.approve-ai-fix.outputs.all_tickets }}
           SMTP_SERVER: smtp.gmail.com
           SMTP_PORT: "587"
         run: |
@@ -815,17 +883,16 @@ jobs:
           import os, smtplib
           from email.mime.multipart import MIMEMultipart
           from email.mime.text import MIMEText
-
-          ticket = os.getenv('TICKET', 'N/A')
+          tickets = os.getenv('ALL_TICKETS', 'N/A')
           msg = MIMEMultipart('alternative')
-          msg['Subject'] = f'✅ {ticket} — AI Fix Deployed to Production'
+          msg['Subject'] = f'✅ AI Fix Deployed & Tickets Closed — {tickets}'
           msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
           msg['To'] = os.getenv('SMTP_USERNAME')
           html = f'''<html><body style=\"font-family:Arial,sans-serif;padding:20px;\">
-            <h2 style=\"color:#16a34a;\">✅ AI Fix Successfully Deployed</h2>
-            <p><strong>Ticket:</strong> {ticket}</p>
-            <p><strong>Status:</strong> RESOLVED — Deployed to production</p>
-            <p>All tests passed. The AI-generated fix is now live.</p>
+            <h2 style=\"color:#16a34a;\">✅ AI Fix Successfully Deployed to Production</h2>
+            <p><strong>Tickets closed:</strong> {tickets}</p>
+            <p><strong>Status:</strong> RESOLVED — Production confirmed healthy</p>
+            <p>All tests passed, fix is live, Jira tickets are closed.</p>
             <p><strong>URL:</strong> ${{ secrets.RENDER_APP_URL }}</p>
           </body></html>'''
           msg.attach(MIMEText(html, 'html'))
@@ -833,7 +900,7 @@ jobs:
             s.starttls()
             s.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
             s.send_message(msg)
-          print('📧 Production deploy notification sent')
+          print('📧 Production deploy + ticket closure notification sent')
           " || echo "Email send failed, continuing"
 
   # ═════════════════════════════════════════════════════════════════
@@ -845,7 +912,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Close AI fix PR
+      - name: Close AI fix PR and update all tickets
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -855,17 +922,22 @@ jobs:
         run: |
           PR_NUM=$(gh pr list --repo ${{ github.repository }} --search "AI Fix" --state open --json number --jq '.[0].number')
           PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
-          TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+          ALL_TICKETS=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | sort -u | tr '\n' ',' | sed 's/,$//')
 
           gh pr close $PR_NUM --repo ${{ github.repository }} --comment "❌ Rejected by human reviewer. Manual fix required."
 
-          curl -s -X POST \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"body":"🤖 AI fix rejected by human reviewer. Manual developer fix required."}' \
-            "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
+          IFS=',' read -ra TKEYS <<< "$ALL_TICKETS"
+          for TK in "${TKEYS[@]}"; do
+            TK=$(echo "$TK" | xargs)
+            echo "📝 Commenting on $TK..."
+            curl -s -X POST \
+              -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"body":"🤖 AI fix rejected by human reviewer. Manual developer fix required."}' \
+              "$JIRA_BASE_URL/rest/api/2/issue/$TK/comment" || true
+          done
 
-          echo "✅ AI fix rejected, Jira updated"
+          echo "✅ AI fix rejected, all tickets ($ALL_TICKETS) updated"
 
   # ═════════════════════════════════════════════════════════════════
   # JOB 6: EMERGENCY ROLLBACK
