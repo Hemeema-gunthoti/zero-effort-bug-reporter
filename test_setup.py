@@ -27,7 +27,7 @@ def check_env():
         "SMTP_USERNAME": "Gmail username for notifications",
         "SMTP_PASSWORD": "Gmail app password",
         "JIRA_SEVERITY_FIELD": "Custom severity field ID",
-        "GROQ_MODEL": "Model name (default: llama-3.3-70b-versatile)",
+        "GROQ_MODEL": "Model name (default: llama-3.1-8b-instant)",
         "ENABLE_AI_FIX": "Set to 'true' to enable AI fix agent",
         "FIX_MODE": "Set to 'propose-only' for human approval",
     }
