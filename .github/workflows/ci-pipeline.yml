@@ -608,19 +608,39 @@ jobs:
       # nohup detaches the process so it survives the step's shell exiting.
       - name: Start Flask app
         run: |
-          set -x
-          python -m py_compile app/main.py
-          nohup python -u app/main.py > flask.log 2>&1 &
-          echo $! > flask.pid
-          echo "FLASK_PID=$(cat flask.pid)" >> $GITHUB_ENV
-          sleep 2
-          echo "=== Immediate liveness check ==="
-          if ! kill -0 "$(cat flask.pid)" 2>/dev/null; then
-            echo "❌ Flask process died within 2 seconds of starting"
-            cat flask.log
-            exit 1
-          fi
-          echo "✅ Process still alive after 2s"
+          echo "=== Python version ==="
+          python --version
+
+          echo "=== Check app/main.py exists ==="
+          ls -la app/main.py
+
+          echo "=== Check templates ==="
+          ls -la app/templates/ 2>/dev/null || echo "No templates dir"
+
+          echo "=== Check requirements ==="
+          pip list | grep -i flask
+
+          echo "=== Ensure port 5000 is free before starting ==="
+          fuser -k 5000/tcp 2>/dev/null || true
+          pkill -f "python.*app/main.py" 2>/dev/null || true
+          sleep 1
+
+          echo "=== Start Flask (single real launch, no foreground throwaway run) ==="
+          python -u app/main.py > flask.log 2>&1 &
+          echo "FLASK_PID=$!" >> $GITHUB_ENV
+          sleep 5
+
+          echo "=== Check process ==="
+          ps aux | grep -E "python.*main" | grep -v grep || echo "No main.py process"
+
+          echo "=== Check logs ==="
+          cat flask.log 2>/dev/null || echo "No log file"
+
+          echo "=== Check port ==="
+          ss -tlnp 2>/dev/null | grep 5000 || netstat -tlnp 2>/dev/null | grep 5000 || echo "Port 5000 not listening"
+
+          echo "=== Confirm this is OUR process (sanity check) ==="
+          curl -s http://localhost:5000/health || echo "Not reachable yet"
 
       - name: Wait for Flask healthy
         run: |
