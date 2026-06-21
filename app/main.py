@@ -19,7 +19,7 @@ def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user" not in session:
-            return redirect(url_for("home"))
+            return redirect(url_for("home")), 403
         return f(*args, **kwargs)
     return decorated
 
@@ -75,7 +75,6 @@ def get_item(item_id):
 def api_list_items():
     return jsonify({"items": ITEMS, "count": len(ITEMS)})
 
-# FIX: Use jsonify for proper JSON response
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'}), 200
