@@ -68,12 +68,12 @@ def item_detail(item_id):
 @app.route("/api/items/<item_id>")
 def get_item(item_id):
     if item_id not in ITEMS:
-        return jsonify({"error": "Item not found", "status": 404}), 404
+        return jsonify({"error": "Item not found"}), 404
     return jsonify({"item": ITEMS[item_id]})
 
 @app.route("/api/items")
 def api_list_items():
-    return jsonify({"items": ITEMS, "count": len(ITEMS)})
+    return jsonify({"items": list(ITEMS.values()), "count": len(ITEMS)})
 
 @app.route('/health')
 def health():
