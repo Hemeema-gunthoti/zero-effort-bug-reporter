@@ -215,9 +215,9 @@ class AIFixAgent:
             })
         return failures
 
-    def _score_files_for_fixing(self, failures: List[Dict]) -> Dict[str, Dict]:
+        def _score_files_for_fixing(self, failures: List[Dict]) -> Dict[str, Dict]:
         files = {}
-        
+
         source_paths = [
             "app/main.py",
             "app/routes.py",
@@ -248,9 +248,16 @@ class AIFixAgent:
             for failure in failures:
                 raw_test_file = (failure.get("test_file") or "").replace("\\", "/")
                 if "tests/" in raw_test_file:
-                   rel_test_path = "tests/" + raw_test_file.split("tests/")[-1]
-                   if rel_test_path not in source_paths:
-                      source_paths.append(rel_test_path)
+                    rel_test_path = "tests/" + raw_test_file.split("tests/")[-1]
+                    if rel_test_path not in source_paths:
+                        source_paths.append(rel_test_path)
+
+                # FIX: Extract these from the failure dict instead of using bare undefined names
+                component = failure.get("component", "")
+                test_file = failure.get("test_file", "")
+                error_type = failure.get("error_type", "")
+                error_text = failure.get("error_summary", "").lower()
+                file_name = Path(path).name  # e.g., "login.py"
 
                 # Component-based matching (strong signal)
                 if component and component in path.lower():
@@ -269,7 +276,7 @@ class AIFixAgent:
                 if error_type == "assertionerror" and any(x in path.lower() for x in ["main.py", "routes.py", "views.py", "auth.py"]):
                     score += 0.2
                     reasons.append("assertionerror → backend")
-                
+
                 if error_type == "timeouterror" or error_type == "timeoutexception":
                     if any(x in path.lower() for x in ["main.py", "routes.py", "auth.py"]):
                         score += 0.25
@@ -284,12 +291,12 @@ class AIFixAgent:
                 if "login" in error_text and "login" in path.lower():
                     score += 0.25
                     reasons.append("login context")
-                
+
                 # Dashboard-related errors → dashboard files
                 if "dashboard" in error_text and "dashboard" in path.lower():
                     score += 0.25
                     reasons.append("dashboard context")
-                
+
                 # Unauthorized/403 errors → auth files
                 if any(x in error_text for x in ["unauthorized", "403", "auth", "login required"]):
                     if any(x in path.lower() for x in ["auth", "login", "main.py", "routes"]):
