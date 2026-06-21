@@ -11,6 +11,7 @@ import re
 import difflib
 from pathlib import Path
 from typing import Dict, List, Optional
+from datetime import datetime
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -33,6 +34,14 @@ class AIFixAgent:
         )
         self.confidence_threshold = 0.5
 
+    # These strings MUST be present in any proposed app/main.py.
+    # If the LLM drops any of them, the fix is rejected and the original is kept.
+    MAIN_PY_REQUIRED = [
+        "@app.route('/health')",
+        "app.run(host=\"0.0.0.0\", port=5000",
+        "debug=False",
+    ]
+
     def propose_fix(self, bug_report_path: str, mode: str = "propose-only") -> Dict:
         """
         Reads a bug report JSON and proposes a fix.
@@ -54,7 +63,7 @@ class AIFixAgent:
         test_name = metadata.get("test_name", "unknown")
         error_type = metadata.get("error_type", "Unknown")
         affected_component = metadata.get("affected_component", "unknown")
-        
+
         jira_ticket = bug_report.get("ticket_key") or bug_report.get("jira_ticket")
         if not jira_ticket:
             jira_ticket = self._get_jira_ticket_from_cache_or_files()
@@ -65,21 +74,29 @@ class AIFixAgent:
         if jira_ticket:
             print(f"🎫 Jira Ticket: {jira_ticket}")
 
+        # Normalize test_file from absolute CI path to repo-relative path.
+        # e.g. /home/runner/work/.../tests/test_login.py → tests/test_login.py
+        raw_test_file = (metadata.get("test_file") or "").replace("\\", "/")
+        if "tests/" in raw_test_file:
+            rel_test_file = "tests/" + raw_test_file.split("tests/")[-1]
+        else:
+            rel_test_file = raw_test_file
+
         failures = [{
             "test_name": test_name,
-            "test_file": metadata.get("test_file"),
-            "error_summary": bug_report.get("title", ""),
-            "error_type": error_type,
+            "test_file": rel_test_file,
+            "error_summary": bug_report.get("title", "") + " " + bug_report.get("description", ""),
+            "error_type": error_type.lower(),
             "component": affected_component,
             "description": bug_report.get("description", ""),
         }]
 
         file_scores = self._score_files_for_fixing(failures)
         high_confidence = {k: v for k, v in file_scores.items() if v['score'] >= self.confidence_threshold}
-        
+
         if not high_confidence:
             print("⚠️ No high-confidence files found. Trying component-based fallback...")
-            component_files = {k: v for k, v in file_scores.items() 
+            component_files = {k: v for k, v in file_scores.items()
                              if v.get('component_match') or v['score'] > 0.1}
             if component_files:
                 print(f"✅ Found {len(component_files)} component-matched files")
@@ -129,7 +146,7 @@ class AIFixAgent:
                     return data.get("ticket_key")
             except:
                 pass
-        
+
         cache_file = ARTIFACT_DIR / "dedup_cache.json"
         if cache_file.exists():
             try:
@@ -233,6 +250,17 @@ class AIFixAgent:
             "app/static/css/style.css",
         ]
 
+        # Discover test files BEFORE the outer loop so they are read and scored.
+        # Previously this was inside the inner loop — paths got appended after
+        # the outer loop had already passed them, so the inner loop never ran
+        # for those paths, leaving component/test_file/etc. undefined → NameError.
+        for failure in failures:
+            raw_test_file = (failure.get("test_file") or "").replace("\\", "/")
+            if "tests/" in raw_test_file:
+                rel_test_path = "tests/" + raw_test_file.split("tests/")[-1]
+                if rel_test_path not in source_paths:
+                    source_paths.append(rel_test_path)
+
         for path in source_paths:
             full_path = Path(os.path.dirname(__file__)).parent / path
             if not full_path.exists():
@@ -246,44 +274,39 @@ class AIFixAgent:
             component_match = False
 
             for failure in failures:
-                raw_test_file = (failure.get("test_file") or "").replace("\\", "/")
-                if "tests/" in raw_test_file:
-                    rel_test_path = "tests/" + raw_test_file.split("tests/")[-1]
-                    if rel_test_path not in source_paths:
-                        source_paths.append(rel_test_path)
-
-                # FIX: Extract these from the failure dict instead of using bare undefined names
+                # All variables initialized inside loop — never undefined.
                 component = failure.get("component", "")
                 test_file = failure.get("test_file", "")
-                error_type = failure.get("error_type", "")
-                error_text = failure.get("error_summary", "").lower()
-                file_name = Path(path).name  # e.g., "login.py"
+                error_type = (failure.get("error_type") or "").lower()
+                error_text = (failure.get("error_summary") or "").lower()
+                file_name = Path(path).name
 
                 # Component-based matching (strong signal)
-                if component and component in path.lower():
+                if component and component.lower() in path.lower():
                     score += 0.4
                     reasons.append(f"component: {component}")
                     component_match = True
 
                 # Test file name matching
                 if test_file:
-                    test_name = Path(test_file).stem
-                    if test_name in path.lower() or test_name.replace("test_", "") in path.lower():
+                    test_stem = Path(test_file).stem           # e.g. "test_login"
+                    app_stem  = test_stem.replace("test_", "") # e.g. "login"
+                    if test_stem in path.lower() or app_stem in path.lower():
                         score += 0.3
-                        reasons.append(f"test_file: {test_name}")
+                        reasons.append(f"test_file: {test_stem}")
 
                 # Error type matching
                 if error_type == "assertionerror" and any(x in path.lower() for x in ["main.py", "routes.py", "views.py", "auth.py"]):
                     score += 0.2
                     reasons.append("assertionerror → backend")
 
-                if error_type == "timeouterror" or error_type == "timeoutexception":
+                if error_type in ("timeouterror", "timeoutexception"):
                     if any(x in path.lower() for x in ["main.py", "routes.py", "auth.py"]):
                         score += 0.25
                         reasons.append("timeout → backend")
 
                 # File name mentioned in error text
-                if file_name in error_text:
+                if file_name and file_name in error_text:
                     score += 0.3
                     reasons.append(f"mentioned: {file_name}")
 
@@ -339,13 +362,17 @@ SOURCE FILES:
 
         prompt += """
 RULES:
-1. MINIMAL changes only — change as few lines as possible
-2. Preserve ALL existing routes, functions, and the exact app.run() configuration unless the fix specifically requires changing them
-3. Do NOT change file paths
-4. Do NOT remove any existing @app.route definitions
-5. Return ONLY a single JSON object with file paths as keys and full file content as values
-6. Do NOT include markdown formatting, explanations, or multiple JSON objects
-7. Example format: {"app/main.py": "import flask..."}
+1. MINIMAL changes only — change as few lines as possible.
+2. app/main.py HARD CONSTRAINTS — you MUST preserve ALL of the following exactly, no exceptions:
+   - The @app.route('/health') route that returns jsonify({'status': 'ok'}), 200
+   - app.run(host="0.0.0.0", port=5000, debug=False) — do NOT change host, port, or debug value
+   - Every existing @app.route definition — do NOT remove or rename any route
+   - The USERS and ITEMS dicts (only change a value if the fix specifically requires it)
+3. Do NOT change file paths.
+4. Do NOT remove any existing @app.route definitions from any file.
+5. Return ONLY a single JSON object with file paths as keys and complete file content as values.
+6. Do NOT include markdown formatting, explanations, or multiple JSON objects.
+7. Example format: {"app/main.py": "from flask import Flask..."}
 8. Decide WHERE the actual bug is before fixing. If a test file is included above:
    - If the test's expected input/output doesn't match constants already defined
      in the application code (e.g. a hardcoded username/password dict), and the
@@ -376,10 +403,8 @@ RULES:
             )
 
             raw = response.choices[0].message.content.strip()
-            
-            # FIX: Aggressive JSON extraction - handle multiple JSON objects, markdown, etc.
             fixes = self._extract_json_from_response(raw, source_files)
-            
+
             if fixes:
                 return fixes
             else:
@@ -393,16 +418,15 @@ RULES:
 
     def _extract_json_from_response(self, raw: str, source_files: Dict[str, str]) -> Dict[str, str]:
         """
-        FIX: Robust JSON extraction from LLM response.
+        Robust JSON extraction from LLM response.
         Handles markdown, multiple JSON objects, extra text, etc.
         """
         # Remove markdown code blocks
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw).strip()
-        
-        # Try to find JSON object boundaries
+
         best_fixes = {}
-        
+
         # Strategy 1: Try parsing the whole thing first
         try:
             parsed = json.loads(raw)
@@ -410,7 +434,7 @@ RULES:
                 return self._validate_fixes(parsed, source_files)
         except json.JSONDecodeError:
             pass
-        
+
         # Strategy 2: Find all JSON-like objects using brace matching
         depth = 0
         start = -1
@@ -428,30 +452,29 @@ RULES:
                         if isinstance(parsed, dict):
                             validated = self._validate_fixes(parsed, source_files)
                             if validated:
-                                # Merge fixes, prefer longer content
                                 for k, v in validated.items():
                                     if k not in best_fixes or len(v) > len(best_fixes[k]):
                                         best_fixes[k] = v
                     except json.JSONDecodeError:
                         pass
                     start = -1
-        
+
         if best_fixes:
             return best_fixes
-        
+
         # Strategy 3: Try to fix common JSON issues and retry
         fixed_raw = raw
-        fixed_raw = re.sub(r',\s*}', '}', fixed_raw)  # Remove trailing commas before }
-        fixed_raw = re.sub(r',\s*]', ']', fixed_raw)  # Remove trailing commas before ]
-        fixed_raw = fixed_raw.replace("'", '"')  # Fix single quotes
-        
+        fixed_raw = re.sub(r',\s*}', '}', fixed_raw)
+        fixed_raw = re.sub(r',\s*]', ']', fixed_raw)
+        fixed_raw = fixed_raw.replace("'", '"')
+
         try:
             parsed = json.loads(fixed_raw)
             if isinstance(parsed, dict):
                 return self._validate_fixes(parsed, source_files)
         except json.JSONDecodeError:
             pass
-        
+
         # Strategy 4: Try first { to last }
         first_brace = raw.find('{')
         last_brace = raw.rfind('}')
@@ -462,19 +485,42 @@ RULES:
                     return self._validate_fixes(parsed, source_files)
             except json.JSONDecodeError:
                 pass
-        
+
         return {}
 
     def _validate_fixes(self, parsed: Dict, source_files: Dict[str, str]) -> Dict[str, str]:
-        """Validate that parsed fixes are for known source files and have reasonable content."""
+        """
+        Validate that parsed fixes are for known source files and have reasonable content.
+        For app/main.py specifically, enforce that critical strings are present —
+        the LLM tends to replace it with a minimal stub that drops /health and
+        changes app.run() config, breaking the CI health check.
+        """
         validated = {}
         for path, content in parsed.items():
-            if isinstance(path, str) and isinstance(content, str):
-                # Check if path is in our source files or is a reasonable file path
-                if path in source_files or path.startswith("app/") or path.startswith("tests/"):
-                    if len(content) > 50:  # Must have substantial content
-                        validated[path] = content
-                        print(f"✅ Valid fix for {path} ({len(content)} chars)")
+            if not isinstance(path, str) or not isinstance(content, str):
+                continue
+            if not (path in source_files or path.startswith("app/") or path.startswith("tests/")):
+                continue
+            if len(content) < 50:
+                print(f"⚠️ Skipping {path} — content too short ({len(content)} chars), likely a stub")
+                continue
+
+            # Hard guard for app/main.py: reject any version that drops
+            # the /health route or changes the app.run() binding.
+            if path == "app/main.py":
+                missing = [req for req in self.MAIN_PY_REQUIRED if req not in content]
+                if missing:
+                    print(f"❌ Rejecting AI fix for app/main.py — missing required strings:")
+                    for m in missing:
+                        print(f"   • {m!r}")
+                    print(f"   Falling back to original app/main.py to avoid breaking Flask startup.")
+                    # Keep the original so it still appears in the PR diff correctly
+                    if path in source_files:
+                        validated[path] = source_files[path]
+                    continue
+
+            validated[path] = content
+            print(f"✅ Valid fix for {path} ({len(content)} chars)")
         return validated
 
     def _generate_diffs(self, fixes: Dict[str, str], originals: Dict[str, str]) -> Dict[str, str]:
@@ -501,7 +547,7 @@ RULES:
             (AI_FIX_DIR / fix_filename).write_text(content)
             manifest[path] = fix_filename
 
-        # FIX: manifest maps original repo path -> generated fix filename, so
+        # manifest maps original repo path -> generated fix filename, so
         # the workflow doesn't have to reverse-engineer the path from the
         # filename. That reversal breaks for paths like tests/test_login.py,
         # since a blind "_" -> "/" swap would wrongly split "test_login.py"
@@ -532,9 +578,6 @@ RULES:
 
         status_text = f"Fix proposed\nJira: {jira_ticket or 'N/A'}\nFiles: {', '.join(fixes.keys())}\nStatus: PENDING_APPROVAL\n"
         (AI_FIX_DIR / "fix_applied.txt").write_text(status_text)
-
-
-from datetime import datetime
 
 
 def main():
