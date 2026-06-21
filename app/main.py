@@ -1,13 +1,12 @@
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort
 from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = "super-secret-key-change-in-production"
 
-# BUG 1 (intentional): wrong password for admin.
-# test_valid_login_redirects_to_dashboard sends "password123" — login fails → TimeoutException.
+# Fix: correct password for admin
 USERS = {
-    "admin": "wrongpassword",
+    "admin": "password123",
     "user1": "user123",
 }
 
@@ -17,13 +16,12 @@ ITEMS = {
     "3": {"name": "Product C", "price": 9.99,  "stock": 300},
 }
 
-# BUG 2 (intentional): redirects to / instead of returning 403 JSON.
-# test_dashboard_requires_auth expects "Unauthorized" or "403" in body.
+# Fix: use abort(403) instead of redirect
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user" not in session:
-            return redirect(url_for("home"))
+            abort(403)
         return f(*args, **kwargs)
     return decorated
 
@@ -82,6 +80,11 @@ def api_list_items():
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'}), 200
+
+# Fix: add error handler for 403
+@app.errorhandler(403)
+def handle_403(e):
+    return jsonify({"error": "Forbidden", "status": 403}), 403
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
