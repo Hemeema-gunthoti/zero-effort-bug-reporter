@@ -624,9 +624,15 @@ jobs:
           DISPLAY: ":99"
         run: |
           pytest tests/ -v --tb=short 2>&1 | tee ai_fix_test.txt
-          FAILED=$(grep -cE "^FAILED " ai_fix_test.txt || echo "0")
-          PASSED=$(grep -cE "^tests.*PASSED" ai_fix_test.txt || echo "0")
+
+          # Count failures using python to avoid grep -c format issues in GITHUB_OUTPUT
+          FAILED=$(python3 -c "
+          lines = open('ai_fix_test.txt').readlines()
+          print(sum(1 for l in lines if l.startswith('FAILED ')))
+          ")
+
           echo "failed_count=$FAILED" >> $GITHUB_OUTPUT
+
           if [ "$FAILED" = "0" ] && grep -q "passed" ai_fix_test.txt; then
             echo "passed=true" >> $GITHUB_OUTPUT
             echo "✅ All tests passed on AI fix branch"
@@ -694,38 +700,44 @@ jobs:
           FROM_EMAIL: ${{ secrets.SMTP_USERNAME }}
           SMTP_SERVER: smtp.gmail.com
           SMTP_PORT: "587"
+          FAILED_COUNT: ${{ steps.test_fix.outputs.failed_count }}
         run: |
           PR_NUM=${{ steps.find_pr.outputs.pr }}
           PR_BODY=$(gh pr view $PR_NUM --repo ${{ github.repository }} --json body --jq '.body')
           TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1)
-          FAILED_COUNT=${{ steps.test_fix.outputs.failed_count }}
 
           gh pr comment $PR_NUM --repo ${{ github.repository }} \
-            --body "❌ AI fix approved by human but **$FAILED_COUNT test(s) still failing**. PR stays open — needs manual revision before merge."
+            --body "❌ AI fix approved by human but **${FAILED_COUNT} test(s) still failing**. PR stays open — needs manual revision before merge."
 
           curl -s -X POST \
             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"body\":\"❌ AI fix was approved but $FAILED_COUNT test(s) still failing on the fix branch. PR #$PR_NUM stays open for manual revision.\"}" \
+            -d "{\"body\":\"❌ AI fix approved but ${FAILED_COUNT} test(s) still failing on fix branch. PR #${PR_NUM} stays open for manual revision.\"}" \
             "$JIRA_BASE_URL/rest/api/2/issue/$TICKET/comment" || true
 
-          python -c "
-          import os, smtplib, sys
+          python3 -c "
+          import os, smtplib
           from email.mime.multipart import MIMEMultipart
           from email.mime.text import MIMEText
+
+          failed_count = os.getenv('FAILED_COUNT', '?')
+          ticket = '${TICKET}'
+
           msg = MIMEMultipart('alternative')
           msg['Subject'] = '⚠️ AI Fix: Tests Still Failing — Manual Revision Needed'
           msg['From'] = os.getenv('FROM_EMAIL', os.getenv('SMTP_USERNAME'))
           msg['To'] = os.getenv('SMTP_USERNAME')
-          html = '''<html><body style=\"font-family:Arial,sans-serif;padding:20px;\">
+
+          html = f'''<html><body style=\"font-family:Arial,sans-serif;padding:20px;\">
             <h2 style=\"color:#d97706;\">⚠️ AI Fix Approved But Tests Still Failing</h2>
-            <p>The AI fix was approved but <strong>$FAILED_COUNT test(s)</strong> are still failing on the fix branch.</p>
+            <p>The AI fix was approved but <strong>{failed_count} test(s)</strong> are still failing on the fix branch.</p>
             <p>The PR has been left open for manual revision.</p>
-            <p><strong>Ticket:</strong> $TICKET</p>
+            <p><strong>Ticket:</strong> {ticket}</p>
             <p>Please review the PR, fix the remaining issues, and push to the branch.</p>
           </body></html>'''
+
           msg.attach(MIMEText(html, 'html'))
-          with smtplib.SMTP(os.getenv('SMTP_SERVER','smtp.gmail.com'), int(os.getenv('SMTP_PORT','587'))) as s:
+          with smtplib.SMTP(os.getenv('SMTP_SERVER', 'smtp.gmail.com'), int(os.getenv('SMTP_PORT', '587'))) as s:
             s.starttls()
             s.login(os.getenv('SMTP_USERNAME'), os.getenv('SMTP_PASSWORD'))
             s.send_message(msg)

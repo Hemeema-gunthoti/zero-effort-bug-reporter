@@ -1,11 +1,11 @@
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, abort
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for
 from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = "super-secret-key-change-in-production"
 
-# BUG 1 (intentional): admin password is wrong.
-# test_valid_login_redirects_to_dashboard sends "password123" — this will fail → TimeoutException.
+# BUG 1 (intentional): wrong password for admin.
+# test_valid_login_redirects_to_dashboard sends "password123" — login fails → TimeoutException.
 USERS = {
     "admin": "wrongpassword",
     "user1": "user123",
@@ -17,8 +17,8 @@ ITEMS = {
     "3": {"name": "Product C", "price": 9.99,  "stock": 300},
 }
 
-# BUG 2 (intentional): login_required redirects to / instead of returning 403.
-# test_dashboard_requires_auth expects "Unauthorized" or "403" in body — redirect returns login HTML.
+# BUG 2 (intentional): redirects to / instead of returning 403 JSON.
+# test_dashboard_requires_auth expects "Unauthorized" or "403" in body.
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
