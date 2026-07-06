@@ -1,18 +1,3 @@
-"""
-tests/test_login.py
--------------------
-Login tests.
-
-Passing  → confirm the happy path works (good baseline signal in CI).
-Failing  → expose real application bugs and trigger artifact capture.
-
-FAIL 1: test_login_with_invalid_password_shows_error
-        App returns 401 but never makes #error-message visible.
-
-FAIL 2: test_login_with_empty_credentials_shows_validation
-        App never makes #validation-error visible.
-"""
-
 import os
 import time
 import pytest
