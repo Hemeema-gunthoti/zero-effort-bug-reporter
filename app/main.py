@@ -6,7 +6,7 @@ app.secret_key = "super-secret-key-change-in-production"
 
 # Fix: correct password for admin
 USERS = {
-    "admin": "password123",
+    "admin": "wrongpassword",
     "user1": "user123",
 }
 
